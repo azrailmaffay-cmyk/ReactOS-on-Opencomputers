@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v2.7  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v2.8  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -30,7 +30,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v2.7"
+local VERSION = "ReactOS-OC v2.8"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -670,7 +670,7 @@ end
 
 local function bar(y, text, bgc, fgc)
   if activeDesktopApp then
-    local appLabel = "ReactOS (" .. activeDesktopApp .. ")"
+    local appLabel = "ReactOS " .. activeDesktopApp
     if y == 1 then text = appLabel
     elseif y == H then text = appLabel .. " | " .. tostring(text) end
   end
@@ -1702,7 +1702,7 @@ do
       if col - 1 < left then left = col - 1 elseif col - left > W then left = col - W end
       color(GRAY, BLACK)
       gpu.fill(1, 1, W, 1, " ")
-      local appPrefix = activeDesktopApp and ("ReactOS (" .. activeDesktopApp .. ") | ") or ""
+      local appPrefix = activeDesktopApp and ("ReactOS " .. activeDesktopApp .. " | ") or ""
       gpu.set(2, 1, unicode.sub(appPrefix .. (syn and "CEdit  " or "Edit  ") .. dispPath(L, p) .. (dirty and "  [modified]" or ""), 1, W - 2))
       color(BG, FG)
       for r = 0, vh - 1 do
@@ -5270,7 +5270,7 @@ local function drawGraphicsSettings(W,H)
   gpu.setBackground(previewBg)
   gpu.fill(2,row,40,3," ")
   gpu.setForeground(previewFg)
-  gpu.set(4,row,  "ReactOS (RBMK Console)")
+  gpu.set(4,row,  "ReactOS RBMK Console")
   gpu.set(4,row+1,"HEAT [|||] 651C ||||||||||||.")
   gpu.set(4,row+2,"NOMINAL")
   if scanlines then
@@ -5515,7 +5515,7 @@ local function drawFooter(W,H,sc,ss,peakTemp)
   end
   gpu.setBackground(0x0a140a); gpu.fill(1,H,W,1," ")
   local fact=FACTS[factIndex]
-  local brand=activeDesktopApp and ("ReactOS ("..activeDesktopApp..") | ") or ""
+  local brand=activeDesktopApp and ("ReactOS "..activeDesktopApp.." | ") or ""
   local footer=brand.."» "..fact
   local mf=W-4; if #footer>mf then footer=footer:sub(1,mf-3).."..." end
   px(2,H,0x44AA44,0x0a140a,footer)
@@ -5739,7 +5739,7 @@ local function drawLogs(W,H)
   local viewH=H-4; local maxScroll=math.max(0,#logLines-viewH)
   logScroll=math.max(0,math.min(logScroll,maxScroll))
   gpu.setBackground(0x0a0a1a); gpu.fill(1,2,W,1," ")
-  px(2,2,0x00FF88,0x0a0a1a,"ReactOS (RBMK Console) - Logs")
+  px(2,2,0x00FF88,0x0a0a1a,"ReactOS RBMK Console - Logs")
   px(14,2,0x555555,0x0a0a1a,logPath)
   local info=string.format("%d/%d  [j]dn [k]up [g]top [G]end",math.min(logScroll+viewH,#logLines),#logLines)
   px(W-#info-1,2,0x444444,0x0a0a1a,info)
@@ -6426,7 +6426,7 @@ end
       klog("RBMK app error: " .. tostring(err))
       cls()
       color(BG, RED)
-      gpu.set(2, 2, "ReactOS (RBMK Console) - Error")
+      gpu.set(2, 2, "ReactOS RBMK Console - Error")
       color(BG, FG)
       gpu.set(2, 4, unicode.sub(tostring(err), 1, math.max(1, W - 4)))
       bar(H, "Press any key to return", GRAY, BLACK)
@@ -6549,7 +6549,8 @@ end
       gpu.set(10, taskTop + 1, unicode.sub("Start", 1, math.max(0, math.min(5, W - 10))))
       local taskLabelX = sw + 2
       local clockX = math.max(taskLabelX + 1, W - 17)
-      gpu.set(taskLabelX, taskTop + 1, unicode.sub("ReactOS (" .. tostring(activeDesktopApp or "Desktop") .. ")", 1, math.max(1, clockX - taskLabelX - 1)))
+      local taskTitle = (activeDesktopApp and activeDesktopApp ~= "ReactX") and ("ReactOS " .. activeDesktopApp) or "ReactOS"
+      gpu.set(taskLabelX, taskTop + 1, unicode.sub(taskTitle, 1, math.max(1, clockX - taskLabelX - 1)))
       gpu.set(clockX, taskTop + 1, os.date("%H:%M"))
       color(BG, FG)
     end
@@ -6608,14 +6609,15 @@ end
     local rw, rh = query("getResolution")
     local mw, mh = query("maxResolution")
     local depth = query("getDepth")
-    return { address=tostring(address), screen=screen and tostring(screen) or "unbound", rw=tonumber(rw), rh=tonumber(rh), mw=tonumber(mw), mh=tonumber(mh), depth=tonumber(depth) }
+    local maxDepth = query("maxDepth")
+    return { address=tostring(address), screen=screen and tostring(screen) or "unbound", rw=tonumber(rw), rh=tonumber(rh), mw=tonumber(mw), mh=tonumber(mh), depth=tonumber(depth), maxDepth=tonumber(maxDepth) }
   end
 
   local function reactsliApp()
     local gpus, screens = componentAddresses("gpu"), componentAddresses("screen")
     local offset = 0
     while true do
-      cls(); bar(1, "ReactOS (ReactSLI) - GPU Inventory", GRAY, BLACK)
+      cls(); bar(1, "ReactOS ReactSLI - GPU Inventory", GRAY, BLACK)
       color(BG, CYAN); gpu.set(2, 3, "GPU adapters (each GPU controls its own screen):")
       color(BG, FG)
       local rowsPerGpu = math.max(1, math.min(8, math.floor((H - 12) / 2)))
@@ -6717,14 +6719,14 @@ end
     end
     local function draw()
       local fresh=readGpuInfo(gpuAddress or first("gpu")) or info
-      cls(); bar(1,"ReactOS (ReactX) - GPU Diagnostics",GRAY,BLACK)
+      cls(); bar(1,"ReactOS ReactX - GPU Diagnostics",GRAY,BLACK)
       color(BG,CYAN); gpu.set(2,3,"Graphics adapter")
       color(BG,FG)
       gpu.set(2,4,unicode.sub("GPU address: "..fresh.address,1,math.max(1,W-3)))
       gpu.set(2,5,unicode.sub("Bound screen: "..fresh.screen,1,math.max(1,W-3)))
       gpu.set(2,6,"Current mode: "..tostring(fresh.rw or "?").."x"..tostring(fresh.rh or "?"))
       gpu.set(2,7,"Maximum mode: "..tostring(fresh.mw or "?").."x"..tostring(fresh.mh or "?"))
-      gpu.set(2,8,"Color depth: "..tostring(fresh.depth or "?").." bit")
+      gpu.set(2,8,"Color depth: "..tostring(fresh.depth or "?").."/"..tostring(fresh.maxDepth or "?").." bit (max)")
       color(BG,operational and GREEN or RED); gpu.set(2,10,operational and "GPU status: OPERATIONAL" or "GPU status: NOT OPERATIONAL")
       local status=#boards==0 and "No Computronics light_board detected" or (tostring(#boards).." Computronics light_board(s) detected (first 4 LEDs used)")
       if animate then status=status.." | rainbow operational"
@@ -6805,7 +6807,7 @@ end
       local label = not panicArmed and labels[sourceIndex]
       if label then drawCaption(label[1], 2, label[2]) end
       local spec = GALLERY_IMAGES[sourceIndex]
-      local maxW = math.max(1, math.min(spec.w, W - 2, math.floor(math.max(1, H - 4) * 2 * spec.w / spec.h)))
+      local maxW = math.max(1, math.min(W, math.floor(math.max(1, H - 4) * 2 * spec.w / spec.h)))
       local photoH = math.max(1, math.floor(maxW * spec.h / spec.w / 2))
       local photoX = math.max(1, math.floor((W - maxW) / 2) + 1)
       sharedDrawGalleryImage(sourceIndex, photoX, 4, maxW, photoH)
@@ -7386,17 +7388,68 @@ local function fatal(msg)
 end
 
 local function boot()
-  local g, s, k = first("gpu"), first("screen"), first("keyboard")
-  if not g then fatal("No GPU detected") end
-  if not s then fatal("No screen detected") end
+  local gpus, screens = componentAddresses("gpu"), componentAddresses("screen")
+  local k = first("keyboard")
+  if #gpus == 0 then fatal("No GPU detected") end
+  if #screens == 0 then fatal("No screen detected") end
   if not k then fatal("No keyboard detected") end
-  gpuAddress = g
-  gpu = component.proxy(g)
-  if not HOSTED or not gpu.getScreen() then gpu.bind(s) end
-  origW, origH = gpu.getResolution()
-  local mw, mh = gpu.maxResolution()
-  W, H = mw, mh
-  gpu.setResolution(W, H)
+
+  -- Probe every GPU/screen pairing. maxResolution and maxDepth are both
+  -- limited by the currently bound screen, so the first component is not
+  -- necessarily the best display. Preserve each GPU's original screen while
+  -- probing, then keep the pair with the largest pixel area and color depth.
+  local best, prior = nil, {}
+  for _, address in ipairs(gpus) do
+    local okProxy, candidate = pcall(component.proxy, address)
+    if okProxy and candidate then
+      local okScreen, oldScreen = pcall(function() return candidate.getScreen() end)
+      local okSize, oldW, oldH = pcall(function() return candidate.getResolution() end)
+      prior[address] = { screen = okScreen and oldScreen or nil,
+        width = okSize and oldW or nil, height = okSize and oldH or nil }
+      for _, screenAddress in ipairs(screens) do
+        local boundOk, boundResult = pcall(function() return candidate.bind(screenAddress, false) end)
+        if boundOk and boundResult ~= false then
+          local modeOk, mw, mh = pcall(function() return candidate.maxResolution() end)
+          local depthOk, depth = pcall(function() return candidate.maxDepth() end)
+          mw, mh, depth = tonumber(mw), tonumber(mh), tonumber(depth)
+          if modeOk and mw and mh and mw > 0 and mh > 0 then
+            local area, depthRank = mw * mh, depth or 0
+            if not best or area > best.area or
+              (area == best.area and depthRank > best.depthRank) or
+              (area == best.area and depthRank == best.depthRank and mw > best.width) then
+              best = { address = address, screen = screenAddress, proxy = candidate,
+                width = mw, height = mh, depth = depth, depthRank = depthRank, area = area }
+            end
+          end
+        end
+      end
+      local old = prior[address]
+      if old and old.screen then pcall(function() candidate.bind(old.screen, false) end) end
+    end
+  end
+
+  local g, screenAddress, selectedDepth, selectedProxy
+  if best then
+    g, screenAddress, selectedDepth, selectedProxy = best.address, best.screen, best.depth, best.proxy
+  else
+    g, screenAddress = gpus[1], screens[1]
+    local okProxy, proxy = pcall(component.proxy, g)
+    if not okProxy or not proxy then fatal("No usable GPU detected") end
+    selectedProxy = proxy
+  end
+  gpuAddress, gpu = g, selectedProxy
+  local bindOk, bindResult = pcall(function() return gpu.bind(screenAddress, false) end)
+  if not bindOk or bindResult == false then fatal("GPU could not bind a screen") end
+
+  local old = prior[g]
+  local sizeOk, currentW, currentH = pcall(function() return gpu.getResolution() end)
+  origW, origH = (old and old.width) or (sizeOk and currentW), (old and old.height) or (sizeOk and currentH)
+  if selectedDepth then pcall(function() gpu.setDepth(selectedDepth) end) end
+  local modeOk, mw, mh = pcall(function() return gpu.maxResolution() end)
+  if not modeOk or not tonumber(mw) or not tonumber(mh) then fatal("GPU could not read the screen resolution") end
+  W, H = tonumber(mw), tonumber(mh)
+  local setOk, setResult = pcall(function() return gpu.setResolution(W, H) end)
+  if not setOk or setResult == false then fatal("GPU could not select its maximum resolution") end
   cls()
 
   local logoW = math.max(1, math.min(48, W - 8))
