@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v3.4  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v3.5  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -30,7 +30,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v3.4"
+local VERSION = "ReactOS-OC v3.5"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -7716,9 +7716,18 @@ if HOSTED and ARGS[1] then
   return nil
 end
 
-local ok, err = pcall(function()
+local function startupErrorTrace(err)
+  local message = tostring(err)
+  local dbg = rawget(_G, "debug")
+  if type(dbg) == "table" and type(dbg.traceback) == "function" then
+    local traceOk, trace = pcall(dbg.traceback, message, 2)
+    if traceOk and type(trace) == "string" then return trace end
+  end
+  return message
+end
+local ok, err = xpcall(function()
   if boot() then wantOS = true else shell() end
-end)
+end, startupErrorTrace)
 
 if HOSTED then
   restore()
