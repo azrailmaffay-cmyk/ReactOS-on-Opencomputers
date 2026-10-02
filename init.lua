@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v3.2  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v3.3  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -30,7 +30,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v3.2"
+local VERSION = "ReactOS-OC v3.3"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -6779,21 +6779,34 @@ end
     local phase,nextFlash=1,computer.uptime()
     local animate=operational and #boards>0
     local lightError,closed,lightsStarted=nil,false,false
+    local function callLightBoard(board, method, ...)
+      if board and board.address and component and type(component.invoke) == "function" then
+        return pcall(component.invoke, board.address, method, ...)
+      end
+      local ok, fn = pcall(function() return board and board.proxy and board.proxy[method] end)
+      if not ok or type(fn) ~= "function" then return false, "light-board method unavailable" end
+      return pcall(fn, ...)
+    end
     local function restoreLights()
       for _,b in ipairs(boards) do
         for i,state in ipairs(b.lights) do
-          pcall(function() b.proxy.setColor(i,state.color) end)
-          pcall(function() b.proxy.setActive(i,state.active) end)
+          local index = math.floor(tonumber(i) or 0)
+          if index > 0 then
+            pcall(callLightBoard, b, "setColor", index, state.color)
+            pcall(callLightBoard, b, "setActive", index, state.active)
+          end
         end
       end
     end
     local function animateLights()
       for _,b in ipairs(boards) do
-        for i=1,math.min(b.count,4) do
-          local okc,rc,mc=pcall(function() return b.proxy.setColor(i,rainbow[(phase+i-2)%#rainbow+1]) end)
-          local oka,ra,ma=true,true,nil
-          if not lightsStarted then oka,ra,ma=pcall(function() return b.proxy.setActive(i,true) end) end
-          if not okc or rc==false or not oka or ra==false then
+        local lightCount = math.floor(tonumber(b.count) or 0)
+        for index=1,math.min(lightCount,4) do
+          local colorIndex = (phase + index - 2) % #rainbow + 1
+          local okc,rc,mc = callLightBoard(b, "setColor", index, rainbow[colorIndex])
+          local oka,ra,ma = true,true,nil
+          if not lightsStarted then oka,ra,ma = callLightBoard(b, "setActive", index, true) end
+          if not okc or rc==false or (rc==nil and mc~=nil) or not oka or ra==false or (ra==nil and ma~=nil) then
             lightError=tostring(mc or ma or rc or ra or "board rejected output")
             animate=false; restoreLights(); return
           end
