@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v3.1  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v3.2  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -30,7 +30,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v3.1"
+local VERSION = "ReactOS-OC v3.2"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -101,6 +101,7 @@ local function refreshDrives()
   drives = {}
   local boot = computer.getBootAddress()
   local list = {}
+  -- RAID arrays expose the same filesystem component API as HDD volumes.
   for a in component.list("filesystem") do list[#list + 1] = a end
   table.sort(list)
   if not boot then boot = list[1] end
@@ -253,19 +254,57 @@ local function fsCopy(a1, p1, a2, p2)
     inv(a1, "close", h1)
     return nil, "cannot write " .. p2
   end
-  local res, err = true, nil
+  local res, err, copied = true, nil, 0
   while true do
-    local ok3, c = inv(a1, "read", h1, BIG)
+    local ok3, c = inv(a1, "read", h1, 4096)
     if not ok3 then res, err = nil, tostring(c); break end
     if not c or c == "" then break end
+    copied = copied + #c
     local ok4, w, we = inv(a2, "write", h2, c)
     if not ok4 or not w then res, err = nil, tostring(ok4 and we or w or "write failed"); break end
   end
   inv(a1, "close", h1)
   inv(a2, "close", h2)
-  return res, err
+  return res, err, copied
 end
 
+
+local function fsFileSize(a, p)
+  local ok, size = inv(a, "size", p)
+  if not ok or type(size) ~= "number" then return nil, tostring(size or "size unavailable") end
+  return size
+end
+
+local function fsReadPrefix(a, p, count)
+  local ok, h, e = inv(a, "open", p, "r")
+  if not ok or not h then return nil, tostring(ok and e or h or "cannot open") end
+  local ok2, data = inv(a, "read", h, count or 256)
+  inv(a, "close", h)
+  if not ok2 then return nil, tostring(data or "read failed") end
+  return data or ""
+end
+
+-- Stream a hosted OpenOS script into a component filesystem without making
+-- another full-size Lua string copy in memory.
+local function fsCopyHost(hostPath, address, path)
+  local opened, source, openErr = pcall(io.open, hostPath, "rb")
+  if not opened or not source then return nil, tostring(opened and openErr or source or "cannot open source") end
+  local ok, handle, writeErr = inv(address, "open", path, "w")
+  if not ok or not handle then pcall(function() source:close() end); return nil, tostring(ok and writeErr or handle or "cannot open destination") end
+  local copied, err = 0, nil
+  while true do
+    local readOk, chunk = pcall(function() return source:read(4096) end)
+    if not readOk then err = tostring(chunk); break end
+    if not chunk or chunk == "" then break end
+    copied = copied + #chunk
+    local writeOk, wrote, why = inv(address, "write", handle, chunk)
+    if not writeOk or not wrote then err = tostring(writeOk and why or wrote or "write failed"); break end
+  end
+  pcall(function() source:close() end)
+  inv(address, "close", handle)
+  if err then return nil, err end
+  return true, nil, copied
+end
 -- Safe overwrite: write temp file, verify, then swap into place.
 local function fsReplace(a, p, data)
   local tmp = p .. ".new"
@@ -481,6 +520,21 @@ local function pickFs(t)
     if drives.C then return drives.C end
     return nil, "no boot drive"
   end
+  if tostring(t):lower() == "raid" then
+    local matches, seen = {}, {}
+    for _, address in pairs(drives) do
+      if not seen[address] then
+        seen[address] = true
+        local ok, label = inv(address, "getLabel")
+        if ok and type(label) == "string" and label:lower():find("raid", 1, true) then
+          matches[#matches + 1] = address
+        end
+      end
+    end
+    if #matches == 1 then return matches[1] end
+    if #matches > 1 then return nil, "more than one RAID-labeled volume; use its drive letter or address prefix" end
+    return nil, "no RAID-labeled volume found; run mount to see the RAID drive letter and label"
+  end
   local l = t:match("^(%a):?$")
   if l and drives[l:upper()] then return drives[l:upper()] end
   for _, a in pairs(drives) do
@@ -489,94 +543,132 @@ local function pickFs(t)
   return nil, "no such drive: " .. t
 end
 
--- Returns the running script's own source, or nil, err. `err` always says
--- exactly which path was tried, so a failure is actionable instead of a
--- mystery "(file not found)".
-local function selfSource(srcPath)
+local function installSource(srcPath)
   if srcPath then
-    local a, p = resolve(srcPath)
-    if not a then return nil, p end
-    local d, e = fsRead(a, p)
-    if not d then return nil, "cannot read " .. srcPath .. " (" .. tostring(e) .. ")" end
-    return d
+    local address, path = resolve(srcPath)
+    if not address then return nil, path end
+    local size, err = fsFileSize(address, path)
+    if not size then return nil, "cannot get source size for " .. srcPath .. " (" .. tostring(err) .. ")" end
+    return { kind = "filesystem", address = address, path = path, size = size }
   end
   if HOSTED then
     if not SELF then
-      return nil, "cannot determine this script's own path; run:  install [drive] <file>  (the exact file you launched, e.g. init)"
+      return nil, "cannot determine this script's path; run install [drive] <file> with the exact file you launched"
     end
-    local f, e = io.open(SELF, "rb")
-    if not f then
-      return nil, "cannot open " .. tostring(SELF) .. " (" .. tostring(e)
-        .. "); run:  install [drive] <file>  with the exact file you launched"
-    end
-    local d = f:read("*a")
-    f:close()
-    if not d or d == "" then
-      return nil, tostring(SELF) .. " is empty; run:  install [drive] <file>"
-    end
-    return d
+    local opened, file, err = pcall(io.open, SELF, "rb")
+    if not opened or not file then return nil, "cannot open " .. tostring(SELF) .. " (" .. tostring(opened and err or file) .. ")" end
+    local seekOk, size = pcall(function() return file:seek("end") end)
+    pcall(function() file:close() end)
+    if not seekOk or type(size) ~= "number" then return nil, "cannot determine source size for " .. tostring(SELF) end
+    return { kind = "host", path = SELF, size = size }
   end
-  local d, e = fsRead(drives.C, "/init.lua")
-  if not d then
-    return nil, "cannot read " .. letterOf(drives.C) .. ":/init.lua (" .. tostring(e) .. ")"
+  if not drives.C then return nil, "no boot filesystem is available" end
+  local size, err = fsFileSize(drives.C, "/init.lua")
+  if not size then return nil, "cannot get source size for C:/init.lua (" .. tostring(err) .. ")" end
+  return { kind = "filesystem", address = drives.C, path = "/init.lua", size = size }
+end
+
+local function copyInstallSource(source, address, path)
+  if source.kind == "host" then
+    return fsCopyHost(source.path, address, path)
   end
-  return d
+  return fsCopy(source.address, source.path, address, path)
 end
 
 local function doInstall(say, target, srcPath)
   local T, err = pickFs(target)
   if not T then return nil, err end
   say("Target drive: " .. letterOf(T) .. ": (" .. T:sub(1, 8) .. "...)")
-  if HOSTED and not srcPath then
-    say("Detected running script at: " .. tostring(SELF))
+  if HOSTED and not srcPath then say("Detected running script at: " .. tostring(SELF)) end
+
+  local source, e = installSource(srcPath)
+  if not source then return nil, tostring(e) end
+  if source.size < 2000 then return nil, "the source file is unexpectedly small (" .. source.size .. " bytes)" end
+  say("Streaming source (" .. source.size .. " bytes) in 4096-byte chunks...")
+
+  local head, headErr
+  if source.kind == "filesystem" then
+    head, headErr = fsReadPrefix(source.address, source.path, 512)
   end
-  local src, e = selfSource(srcPath)
-  if not src then
-    return nil, tostring(e)
+  if source.kind == "filesystem" and (not head or not head:find("ReactOS-OC", 1, true)) then
+    return nil, "the source file does not look like ReactOS-OC (" .. tostring(headErr or "unexpected content") .. ")"
   end
-  if #src < 2000 or not src:find("ReactOS-OC", 1, true) then
-    return nil, "the source file does not look like ReactOS-OC (unexpected content)"
-  end
-  say("Checking source (" .. #src .. " bytes)...")
-  local okc, f, ce = pcall(load, src, "=init")
-  if not okc or not f then return nil, "source does not compile: " .. tostring(okc and ce or f) end
-  f = nil
+
   local okr, ro = inv(T, "isReadOnly")
   if okr and ro then return nil, "target drive is read-only" end
-  local ok1, tot = inv(T, "spaceTotal")
+  local ok1, total = inv(T, "spaceTotal")
   local ok2, used = inv(T, "spaceUsed")
-  local cur = fsRead(T, "/init.lua")
-  if ok1 and ok2 and tot - used < #src + #(cur or "") + 4096 then
-    return nil, "not enough free space on the target drive"
+  local currentExists = fsExists(T, "/init.lua")
+  local currentSize, currentHead = 0, ""
+  if currentExists then
+    currentSize, err = fsFileSize(T, "/init.lua")
+    if not currentSize then return nil, "cannot check existing /init.lua size: " .. tostring(err) end
+    currentHead, err = fsReadPrefix(T, "/init.lua", 512)
+    if not currentHead then return nil, "cannot inspect existing /init.lua: " .. tostring(err) end
   end
-  local ee = first("eeprom")
-  if ee then
-    local ok3, code = pcall(component.invoke, ee, "get")
+  local needsBackup = currentExists and not currentHead:find("ReactOS-OC", 1, true)
+  if ok1 and ok2 and type(total) == "number" and type(used) == "number" then
+    local required = source.size + (currentExists and currentSize or 0) + 4096
+    if needsBackup then required = required + currentSize end
+    if total - used < required then return nil, "not enough free space on the target filesystem (including RAID volumes)" end
+  end
+
+  local eeprom = first("eeprom")
+  if eeprom then
+    local ok3, code = pcall(component.invoke, eeprom, "get")
     if ok3 and not (code and code:find("init.lua", 1, true)) then
       say("Warning: the EEPROM does not look like a standard BIOS; it may not boot /init.lua.")
     end
   end
-  if cur and not cur:find("ReactOS-OC", 1, true) then
-    say("Backing up current /init.lua -> " .. BACKUP)
-    local ok, we = fsReplace(T, BACKUP, cur)
-    if not ok then return nil, "backup failed: " .. tostring(we) end
-  elseif cur then
+
+  if needsBackup then
+    say("Backing up current /init.lua -> " .. BACKUP .. " (streaming)")
+    local backupTmp = BACKUP .. ".new"
+    if fsExists(T, backupTmp) then inv(T, "remove", backupTmp) end
+    local copied, copyErr, count = fsCopy(T, "/init.lua", T, backupTmp)
+    local backupSize = fsFileSize(T, backupTmp)
+    if not copied or count ~= currentSize or backupSize ~= currentSize then
+      inv(T, "remove", backupTmp)
+      return nil, "backup failed: " .. tostring(copyErr or "size verification failed")
+    end
+    if fsExists(T, BACKUP) then
+      local removed, removeResult = inv(T, "remove", BACKUP)
+      if not removed or not removeResult then inv(T, "remove", backupTmp); return nil, "cannot replace existing OpenOS backup" end
+    end
+    local renamed, renameResult = inv(T, "rename", backupTmp, BACKUP)
+    if not renamed or not renameResult then return nil, "backup rename failed (copy left at " .. backupTmp .. ")" end
+  elseif currentExists then
     say("ReactOS-OC is already installed here; updating it.")
   else
     say("No existing /init.lua found; no backup needed.")
   end
+
   fsMkdirs(T, CFGDIR .. "/rc.d")
   fsMkdirs(T, "/ProgramFiles")
   fsMkdirs(T, "/Users")
-  say("Writing /init.lua ...")
-  local ok, we = fsReplace(T, "/init.lua", src)
-  if not ok then return nil, tostring(we) end
-  local oks, sz = inv(T, "size", "/init.lua")
-  if not oks or sz ~= #src then return nil, "written file has the wrong size (" .. tostring(sz) .. " vs " .. #src .. ")" end
-  say(string.format("OK: %d bytes written to %s:/init.lua", #src, letterOf(T)))
-  local ba = computer.getBootAddress()
-  if ba and ba ~= T then
-    say("Note: the computer booted from " .. ba:sub(1, 8) .. "..., NOT from the drive you installed to.")
+  local tempPath = "/init.lua.new"
+  if fsExists(T, tempPath) then inv(T, "remove", tempPath) end
+  say("Writing /init.lua from a small streaming buffer...")
+  local copied, copyErr, count = copyInstallSource(source, T, tempPath)
+  if not copied then inv(T, "remove", tempPath); return nil, "source copy failed: " .. tostring(copyErr) end
+  local tempSize = fsFileSize(T, tempPath)
+  local tempHead, verifyErr = fsReadPrefix(T, tempPath, 512)
+  if count ~= source.size or tempSize ~= source.size or not tempHead or not tempHead:find("ReactOS-OC", 1, true) then
+    inv(T, "remove", tempPath)
+    return nil, "streamed source verification failed (" .. tostring(verifyErr or ("copied " .. tostring(count) .. " of " .. tostring(source.size) .. " bytes")) .. ")"
+  end
+  if fsExists(T, "/init.lua") then
+    local removed, removeResult = inv(T, "remove", "/init.lua")
+    if not removed or not removeResult then inv(T, "remove", tempPath); return nil, "cannot replace /init.lua" end
+  end
+  local renamed, renameResult = inv(T, "rename", tempPath, "/init.lua")
+  if not renamed or not renameResult then return nil, "install rename failed (new file left at " .. tempPath .. ")" end
+  local finalSize = fsFileSize(T, "/init.lua")
+  if finalSize ~= source.size then return nil, "written file has the wrong size (" .. tostring(finalSize) .. " vs " .. tostring(source.size) .. ")" end
+  say(string.format("OK: %d bytes written to %s:/init.lua", source.size, letterOf(T)))
+  local bootAddress = computer.getBootAddress()
+  if bootAddress and bootAddress ~= T then
+    say("Note: the computer booted from " .. bootAddress:sub(1, 8) .. "..., NOT from the drive you installed to.")
     say("The BIOS may keep booting the other drive.")
   end
   say("Installed. Reboot to start ReactOS-OC (press O during boot for OpenOS).")
@@ -586,35 +678,27 @@ end
 local function doUninstall(say, target)
   local T, err = pickFs(target)
   if not T then return nil, err end
-  local cur = fsRead(T, "/init.lua")
-  if not cur or not cur:find("ReactOS-OC", 1, true) then return nil, "ReactOS-OC is not installed on that drive" end
-  local bak = fsRead(T, BACKUP)
-  if not bak or bak == "" then return nil, "no OpenOS backup (" .. BACKUP .. ") found; nothing to restore" end
-  say("Restoring original /init.lua ...")
-  local ok, we = fsReplace(T, "/init.lua", bak)
-  if not ok then return nil, tostring(we) end
+  local current = fsReadPrefix(T, "/init.lua", 256)
+  if not current or not current:find("ReactOS-OC", 1, true) then return nil, "ReactOS-OC is not installed on that drive" end
+  local backupSize = fsFileSize(T, BACKUP)
+  if not backupSize or backupSize == 0 then return nil, "no OpenOS backup (" .. BACKUP .. ") found; nothing to restore" end
+  say("Restoring original /init.lua using a streamed copy...")
+  local tempPath = "/init.lua.restore.new"
+  if fsExists(T, tempPath) then inv(T, "remove", tempPath) end
+  local copied, copyErr, count = fsCopy(T, BACKUP, T, tempPath)
+  local restoredSize = fsFileSize(T, tempPath)
+  if not copied or count ~= backupSize or restoredSize ~= backupSize then
+    inv(T, "remove", tempPath)
+    return nil, "restore copy failed: " .. tostring(copyErr or "size verification failed")
+  end
+  local removed, removeResult = inv(T, "remove", "/init.lua")
+  if not removed or not removeResult then inv(T, "remove", tempPath); return nil, "cannot replace /init.lua" end
+  local renamed, renameResult = inv(T, "rename", tempPath, "/init.lua")
+  if not renamed or not renameResult then return nil, "restore rename failed (copy left at " .. tempPath .. ")" end
   inv(T, "remove", BACKUP)
   say("Done. The original boot program is back; reboot to use it.")
   return true
 end
-
-------------------------------------------------------------------
--- 5. Palette and console
-------------------------------------------------------------------
-local BG    = 0x000080
-local FG    = 0xFFFFFF
-local GRAY  = 0xC0C0C0
-local BLACK = 0x000000
-local CYAN  = 0x87CEFA
-local GREEN = 0x00C000
-local RED   = 0xFF5555
-
-local gpu, gpuAddress, W, H, cx, cy = nil, nil, 80, 25, 1, 1
-local activeDesktopApp = nil
-local origW, origH
-local meType = nil
-local sink, STDIN = nil, nil        -- pipe capture / pipe input
-local quitShell, wantOS = false, false
 
 local function color(bg, fg)
   gpu.setBackground(bg)
@@ -2034,7 +2118,7 @@ end, "flash                 show EEPROM info\nflash -r <file>       save the cur
 ------------------------------------------------------------------
 -- 10. Commands: administration
 ------------------------------------------------------------------
-def("install", "install [drive|address] [file]", "Install ReactOS-OC as the boot OS", function(raw, a)
+def("install", "install [drive|address|raid] [file]", "Install ReactOS-OC as the boot OS", function(raw, a)
   local o, r = parseFlags(a)
   if not o.y then
     out("This makes ReactOS-OC the boot program (/init.lua) on the target drive.\n"
@@ -2043,7 +2127,7 @@ def("install", "install [drive|address] [file]", "Install ReactOS-OC as the boot
   end
   local ok, err = doInstall(function(m) out(m .. "\n") end, r[1], r[2])
   if not ok then color(BG, RED); out("Install failed: " .. tostring(err) .. "\n"); color(BG, FG) end
-end, "install [-y] [drive|address] [source-file]\n\nFrom OpenOS you can also run:  <this-file-name> install   (for example: init install)\nDefault target is the drive you booted from (C:). Give a drive letter (D:) or an\naddress prefix to install onto another drive. The source is this running script;\npass a file name if it cannot be detected.\n\nIt writes /init.lua safely (temp file, verify, swap) and also creates /System32,\n/ProgramFiles and /Users. Any standard EEPROM BIOS will then boot ReactOS.\nUse 'bootinfo' afterwards to confirm.")
+end, "install [-y] [drive|address|raid] [source-file]\n\nFrom OpenOS you can also run:  <this-file-name> install   (for example: init install)\nDefault target is the drive you booted from (C:). Give a drive letter (D:), RAID, or an\naddress prefix to install onto another drive. The source is this running script;\npass a file name if it cannot be detected. Use 'raid' to select a RAID-labeled volume. Copies are streamed in small chunks to reduce RAM use.\n\nIt supports standard filesystem volumes, including RAID. It streams /init.lua through a temporary file, then verifies and swaps it. It also creates /System32,\n/ProgramFiles and /Users. Any standard EEPROM BIOS will then boot ReactOS.\nUse 'bootinfo' afterwards to confirm.")
 
 def("uninstall", "uninstall [drive|address]", "Restore the original /init.lua (OpenOS)", function(raw, a)
   local o, r = parseFlags(a)
