@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v3.3  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v3.4  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -30,7 +30,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v3.3"
+local VERSION = "ReactOS-OC v3.4"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -6438,8 +6438,25 @@ end
 
 -- ── Startup ───────────────────────────────────────────────────
 local function fixResolution()
-  local mW,mH=gpu.maxResolution(); local cW,cH=gpu.getResolution()
-  if cW~=mW or cH~=mH then gpu.setResolution(mW,mH) end
+  local maxOk,mW,mH=pcall(function() return gpu.maxResolution() end)
+  local curOk,cW,cH=pcall(function() return gpu.getResolution() end)
+  mW,mH=tonumber(mW),tonumber(mH)
+  cW,cH=tonumber(cW),tonumber(cH)
+  local validMax=maxOk and mW and mH and mW==mW and mH==mH
+    and mW<math.huge and mH<math.huge and mW>=1 and mH>=1
+  if validMax then
+    mW,mH=math.floor(mW),math.floor(mH)
+    if not (curOk and cW==mW and cH==mH) then
+      local setOk,result=pcall(function() return gpu.setResolution(mW,mH) end)
+      if not setOk or result==false then
+        klog("GPU maximum resolution could not be selected; keeping the current mode")
+      end
+    end
+  elseif curOk and cW and cH then
+    klog("GPU maximum resolution is unavailable; keeping current mode "..tostring(cW).."x"..tostring(cH))
+  else
+    klog("GPU resolution query failed; continuing without changing the current mode")
+  end
 end
 fixResolution()
 initLog()
