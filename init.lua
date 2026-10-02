@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v2.8  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v3.0  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -30,7 +30,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v2.8"
+local VERSION = "ReactOS-OC v3.0"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -7448,8 +7448,46 @@ local function boot()
   local modeOk, mw, mh = pcall(function() return gpu.maxResolution() end)
   if not modeOk or not tonumber(mw) or not tonumber(mh) then fatal("GPU could not read the screen resolution") end
   W, H = tonumber(mw), tonumber(mh)
-  local setOk, setResult = pcall(function() return gpu.setResolution(W, H) end)
-  if not setOk or setResult == false then fatal("GPU could not select its maximum resolution") end
+  -- Try the largest reported mode first, then progressively smaller modes.
+  -- A GPU can report its screen limit yet decline a mode at runtime; retain a
+  -- usable display instead of stopping the whole OS at startup.
+  local maxW, maxH = W, H
+  local modes, seenModes = {}, {}
+  local function addMode(width, height)
+    width, height = math.floor(tonumber(width) or 0), math.floor(tonumber(height) or 0)
+    local key = tostring(width) .. "x" .. tostring(height)
+    if width >= 20 and height >= 8 and width <= maxW and height <= maxH and not seenModes[key] then
+      modes[#modes + 1] = { width, height }
+      seenModes[key] = true
+    end
+  end
+  addMode(maxW, maxH)
+  for _, scale in ipairs({ 0.9, 0.8, 0.7, 0.6, 0.5, 0.4 }) do
+    addMode(maxW * scale, maxH * scale)
+  end
+  for _, mode in ipairs({ {160,50}, {128,40}, {100,30}, {80,25}, {50,16} }) do
+    addMode(mode[1], mode[2])
+  end
+  local modeSelected = false
+  for _, mode in ipairs(modes) do
+    local setOk, setError = pcall(function() return gpu.setResolution(mode[1], mode[2]) end)
+    local verifyOk, actualW, actualH = pcall(function() return gpu.getResolution() end)
+    if verifyOk and tonumber(actualW) == mode[1] and tonumber(actualH) == mode[2] then
+      W, H, modeSelected = mode[1], mode[2], true
+      break
+    elseif not setOk then
+      klog("resolution " .. mode[1] .. "x" .. mode[2] .. " rejected: " .. tostring(setError))
+    end
+  end
+  if not modeSelected then
+    local verifyOk, actualW, actualH = pcall(function() return gpu.getResolution() end)
+    if verifyOk and tonumber(actualW) and tonumber(actualH) and actualW >= 20 and actualH >= 8 then
+      W, H = tonumber(actualW), tonumber(actualH)
+      klog("using current display mode " .. W .. "x" .. H)
+    else
+      fatal("GPU could not establish a usable display mode")
+    end
+  end end
   cls()
 
   local logoW = math.max(1, math.min(48, W - 8))
