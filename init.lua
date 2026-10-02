@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v3.0  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v3.1  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -30,7 +30,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v3.0"
+local VERSION = "ReactOS-OC v3.1"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -7487,7 +7487,7 @@ local function boot()
     else
       fatal("GPU could not establish a usable display mode")
     end
-  end end
+  end
   cls()
 
   local logoW = math.max(1, math.min(48, W - 8))
