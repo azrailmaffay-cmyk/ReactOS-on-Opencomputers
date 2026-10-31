@@ -6551,105 +6551,217 @@ end
       { "ntm_fusion_mhdt", "MHD TURBINE" },
       { "ntm_fusion_breeder", "BREEDING CHAMBER" },
     }
-    local units, offset = {}, 0
-    local function scan()
-      units = {}
-      for _, item in ipairs(kinds) do
-        for _, address in ipairs(componentAddresses(item[1])) do
-          units[#units + 1] = { type = item[1], label = item[2], address = address }
-        end
-      end
-    end
-    scan()
+    local units, snapshots, hits = {}, {}, {}
+    local selected, offset = 1, 0
     local function call(address, method)
-      local result = { n = 0 }
-      local function capture(...)
-        result.n = select("#", ...)
-        for i = 1, result.n do result[i] = select(i, ...) end
-      end
+      local result = {}
+      local function capture(...) for i = 1, select("#", ...) do result[i] = select(i, ...) end end
       local ok = pcall(function() capture(component.invoke(address, method)) end)
-      if not ok then return nil end
-      return result
+      return ok and result or nil
     end
-    local function number(value)
-      local n = tonumber(value)
+    local function fmt(v)
+      local n = tonumber(v)
       return n and commas(math.floor(n + 0.5)) or "?"
     end
-    local function describe(unit)
-      local t, a = unit.type, unit.address
+    local function short(v, width)
+      return unicode.sub(tostring(v or "?"), 1, width or 12)
+    end
+    local function readUnit(unit)
+      local a, t = unit.address, unit.type
+      local d = { metrics = {}, status = "NO DATA", activity = 0 }
+      local function add(label, value, amount, maximum)
+        d.metrics[#d.metrics + 1] = { label, tostring(value), tonumber(amount), tonumber(maximum) }
+        if value ~= "?" then d.status = "STANDBY" end
+      end
       if t == "ntm_fusion_torus" then
         local e, f = call(a, "getEnergyInfo"), call(a, "getFluid")
         local k, p, c = call(a, "getKlystronEnergy"), call(a, "getPlasmaEnergy"), call(a, "getFuelConsumption")
-        return "HE " .. (e and number(e[1]) .. "/" .. number(e[2]) or "?")
-          .. "  " .. (f and tostring(f[3] or "Fuel1") or "Fuel1") .. " " .. (f and number(f[1]) or "?")
-          .. "  " .. (f and tostring(f[6] or "Fuel2") or "Fuel2") .. " " .. (f and number(f[4]) or "?")
-          .. "  KYU " .. (k and number(k[1]) or "?") .. "  TU " .. (p and number(p[1]) or "?")
-          .. "  FUEL " .. (c and number(c[1]) or "?") .. "/t"
+        add("PLASMA OUTPUT", p and (fmt(p[1]) .. " TU/t") or "?", p and p[1])
+        add("KLYSTRON INPUT", k and (fmt(k[1]) .. " KYU/t") or "?", k and k[1])
+        add("ENERGY BUFFER", e and (fmt(e[1]) .. " / " .. fmt(e[2]) .. " HE") or "?", e and e[1], e and e[2])
+        add(short(f and f[3] or "FUEL 1", 12), f and (fmt(f[1]) .. " mB") or "?", f and f[1], f and f[2])
+        add(short(f and f[6] or "FUEL 2", 12), f and (fmt(f[4]) .. " mB") or "?", f and f[4], f and f[5])
+        add("FUEL USE", c and (fmt(c[1]) .. " mB/t") or "?", c and c[1])
+        d.activity = (tonumber(p and p[1]) or 0) + (tonumber(k and k[1]) or 0)
       elseif t == "ntm_fusion_klystron" then
-        local o, e = call(a, "getOutput"), call(a, "getEnergyInfo")
-        return "OUTPUT " .. (o and number(o[1]) .. "/" .. number(o[2]) .. " KYU/t" or "?")
-          .. "  HE " .. (e and number(e[1]) .. "/" .. number(e[2]) or "?")
+        local o, e, air = call(a, "getOutput"), call(a, "getEnergyInfo"), call(a, "getAir")
+        add("OUTPUT", o and (fmt(o[1]) .. " / " .. fmt(o[2]) .. " KYU/t") or "?", o and o[1], o and o[2])
+        add("ENERGY BUFFER", e and (fmt(e[1]) .. " / " .. fmt(e[2]) .. " HE") or "?", e and e[1], e and e[2])
+        add("COMPRESSED AIR", air and (fmt(air[1]) .. " / " .. fmt(air[2]) .. " mB") or "?", air and air[1], air and air[2])
+        d.activity = tonumber(o and o[1]) or 0
       elseif t == "ntm_fusion_boiler" then
         local p, f = call(a, "getPlasmaEnergy"), call(a, "getFluid")
-        return "PLASMA " .. (p and number(p[1]) or "?") .. " TU  WATER "
-          .. (f and number(f[1]) .. "/" .. number(f[2]) or "?") .. "  STEAM "
-          .. (f and number(f[3]) .. "/" .. number(f[4]) or "?")
+        add("PLASMA INPUT", p and (fmt(p[1]) .. " TU") or "?", p and p[1])
+        add("WATER", f and (fmt(f[1]) .. " / " .. fmt(f[2]) .. " mB") or "?", f and f[1], f and f[2])
+        add("DENSE STEAM", f and (fmt(f[3]) .. " / " .. fmt(f[4]) .. " mB") or "?", f and f[3], f and f[4])
+        d.activity = tonumber(p and p[1]) or 0
       elseif t == "ntm_fusion_mhdt" then
-        local e, p = call(a, "getEnergyInfo"), call(a, "getPlasmaEnergy")
-        local c = call(a, "getCoolant")
-        return "BUFFER " .. (e and number(e[1]) or "?") .. " HE  PLASMA "
-          .. (p and number(p[1]) or "?") .. " TU  COOLANT "
-          .. (c and number(c[1]) .. "/" .. number(c[2]) or "?")
+        local e, p, c = call(a, "getEnergyInfo"), call(a, "getPlasmaEnergy"), call(a, "getCoolant")
+        add("PLASMA INPUT", p and (fmt(p[1]) .. " TU") or "?", p and p[1])
+        add("ENERGY BUFFER", e and (fmt(e[1]) .. " HE") or "?", e and e[1])
+        add("COLD COOLANT", c and (fmt(c[1]) .. " / " .. fmt(c[2]) .. " mB") or "?", c and c[1], c and c[2])
+        add("HOT COOLANT", c and (fmt(c[3]) .. " / " .. fmt(c[4]) .. " mB") or "?", c and c[3], c and c[4])
+        d.activity = tonumber(p and p[1]) or 0
       else
         local n, progress = call(a, "getNeutronEnergy"), call(a, "getProgress")
         local f, slots = call(a, "getFluid"), call(a, "getCrafting")
-        local function short(v) return unicode.sub(tostring(v or "?"), 1, 9) end
-        local slot1 = slots and (short(slots[2] or "Empty") .. "x" .. tostring(slots[1] or 0)) or "?"
-        local slot2 = slots and (short(slots[4] or "Empty") .. "x" .. tostring(slots[3] or 0)) or "?"
-        return "N " .. (n and number(n[1]) or "?") .. " P " .. (progress and number(progress[1]) or "?")
-          .. " IN " .. (f and short(f[3]) .. ":" .. number(f[1]) or "?")
-          .. " OUT " .. (f and short(f[6]) .. ":" .. number(f[4]) or "?")
-          .. " S1 " .. slot1 .. " S2 " .. slot2
+        add("NEUTRON ENERGY", n and fmt(n[1]) or "?", n and n[1])
+        add("BREEDING PROGRESS", progress and fmt(progress[1]) or "?", progress and progress[1])
+        add("INPUT FLUID", f and (short(f[3]) .. "  " .. fmt(f[1]) .. " mB") or "?", f and f[1], f and f[2])
+        add("OUTPUT FLUID", f and (short(f[6]) .. "  " .. fmt(f[4]) .. " mB") or "?", f and f[4], f and f[5])
+        add("CRAFTING SLOT 1", slots and (short(slots[2] or "Empty") .. " x" .. tostring(slots[1] or 0)) or "?")
+        add("CRAFTING SLOT 2", slots and (short(slots[4] or "Empty") .. " x" .. tostring(slots[3] or 0)) or "?")
+        d.activity = tonumber(n and n[1]) or 0
+      end
+      if d.activity > 0 then d.status = "ACTIVE" end
+      snapshots[unit.address] = d
+    end
+    local function refresh()
+      local keep = units[selected] and units[selected].address
+      units = {}
+      for _, kind in ipairs(kinds) do
+        for _, address in ipairs(componentAddresses(kind[1])) do
+          units[#units + 1] = { type = kind[1], label = kind[2], address = address }
+        end
+      end
+      table.sort(units, function(a, b)
+        if a.type ~= b.type then return a.type < b.type end
+        return a.address < b.address
+      end)
+      selected, offset, snapshots = 1, 0, {}
+      for i, unit in ipairs(units) do
+        if unit.address == keep then selected = i end
+        readUnit(unit)
+      end
+    end
+    local function fill(x, y, w, h, bg)
+      if w > 0 and h > 0 then color(bg, bg); gpu.fill(x, y, w, h, " ") end
+    end
+    local function text(x, y, value, width, fg, bg)
+      if width > 0 and x >= 1 and x + width - 1 <= W and y >= 1 and y <= H then
+        color(bg, fg); gpu.set(x, y, unicode.sub(tostring(value or ""), 1, width))
       end
     end
     local function draw()
-      cls(); bar(1, "Fusion Monitor | connected NTM fusion components", GRAY, BLACK)
-      color(BG, FG)
-      gpu.set(2, 2, "Read-only live telemetry  |  Units detected: " .. tostring(#units))
-      local visible = math.max(1, math.floor((H - 6) / 2))
-      if #units == 0 then
-        gpu.set(2, 4, "No ntm_fusion_* components found on this computer network.")
-        gpu.set(2, 6, "Connect OC cables to a fusion vessel, klystron, boiler, turbine, or breeder.")
-      else
-        offset = math.max(0, math.min(offset, math.max(0, #units - visible)))
-        for row = 1, visible do
-          local unit = units[offset + row]
-          if not unit then break end
-          local y = row + 3
-          color(GRAY, BLACK); gpu.fill(2, y, math.max(1, W - 3), 1, " ")
-          gpu.set(3, y, unicode.sub(unit.label .. "  " .. unit.address:sub(1, 8), 1, math.max(1, W - 5)))
-          color(BG, FG)
-          gpu.set(4, y + 1, unicode.sub(describe(unit), 1, math.max(1, W - 6)))
+      cls()
+      local dark, panel, raised, cyan, soft = 0x0A1218, 0x14212B, 0x1D303B, 0x36D6D6, 0xAFC2CB
+      fill(1, 1, W, 1, dark)
+      text(2, 1, "REACTOS  /  FUSION CONTROL", math.max(1, W - 20), cyan, dark)
+      text(math.max(1, W - 16), 1, "LIVE", math.min(14, W), GREEN, dark)
+      fill(1, 2, W, 2, 0x101A22)
+      text(2, 2, "NTM FUSION ARRAY", W - 3, WHITE, 0x101A22)
+      text(2, 3, "Read-only telemetry   |   Auto refresh: 2 sec", W - 3, soft, 0x101A22)
+
+      local vessels, klystrons, support, breeders = 0, 0, 0, 0
+      for _, unit in ipairs(units) do
+        if unit.type == "ntm_fusion_torus" then vessels = vessels + 1
+        elseif unit.type == "ntm_fusion_klystron" then klystrons = klystrons + 1
+        elseif unit.type == "ntm_fusion_breeder" then breeders = breeders + 1
+        else support = support + 1 end
+      end
+      local compact = H < 17
+      if not compact then
+        local tiles = {
+          { "TOTAL UNITS", #units, cyan }, { "VESSELS", vessels, 0xFF9B62 },
+          { "KLYSTRONS", klystrons, 0xFFD166 }, { "SUPPORT + BREEDERS", support + breeders, 0x7ED6A8 },
+        }
+        local gap, tileY, tileH = 1, 5, 3
+        local tileW = math.max(1, math.floor((W - 4 - gap * (#tiles - 1)) / #tiles))
+        for i, tile in ipairs(tiles) do
+          local x = 2 + (i - 1) * (tileW + gap)
+          fill(x, tileY, tileW, tileH, panel)
+          text(x + 1, tileY, tile[1], tileW - 2, soft, panel)
+          text(x + 1, tileY + 1, tostring(tile[2]), tileW - 2, tile[3], panel)
         end
       end
-      bar(H, "Up/Down: scroll | R: refresh | Q/Esc: close", GRAY, BLACK)
+
+      local top, bottom = compact and 5 or 9, H - 1
+      local panelH = math.max(1, bottom - top + 1)
+      local wide = W >= 74 and panelH >= 8
+      local leftX, leftW, rightX, rightW = 2, W - 3, nil, 0
+      if wide then
+        leftW = math.floor((W - 5) * 0.46)
+        rightX, rightW = leftX + leftW + 2, W - leftX - leftW - 3
+      end
+      fill(leftX, top, leftW, panelH, panel)
+      fill(leftX, top, leftW, 1, 0x087986)
+      text(leftX + 1, top, "FUSION COMPONENTS", leftW - 2, WHITE, 0x087986)
+      local listTop = top + 1
+      local cardH = wide and 3 or (compact and 2 or 4)
+      local pageSize = math.max(1, math.floor((panelH - 1) / cardH))
+      offset = math.max(0, math.min(offset, math.max(0, #units - pageSize)))
+      hits = {}
+      if #units == 0 then
+        text(leftX + 2, listTop + 2, "NO UNITS DETECTED", leftW - 4, 0xFF9B62, panel)
+        text(leftX + 2, listTop + 4, "Connect fusion components", leftW - 4, soft, panel)
+        text(leftX + 2, listTop + 5, "and press R to rescan.", leftW - 4, soft, panel)
+      else
+        if selected < offset + 1 then offset = selected - 1 end
+        if selected > offset + pageSize then offset = selected - pageSize end
+        for row = 1, pageSize do
+          local index = offset + row
+          local unit = units[index]
+          if not unit then break end
+          local y = listTop + (row - 1) * cardH
+          local d = snapshots[unit.address] or { metrics = {}, status = "NO DATA" }
+          local bg = index == selected and raised or panel
+          local statusColor = d.status == "ACTIVE" and GREEN or (d.status == "NO DATA" and RED or 0xFFD166)
+          fill(leftX + 1, y, leftW - 2, cardH - 1, bg)
+          text(leftX + 2, y, unit.label, math.max(1, leftW - 13), index == selected and cyan or WHITE, bg)
+          text(leftX + leftW - 10, y, d.status, 9, statusColor, bg)
+          local first = d.metrics[1] and (d.metrics[1][1] .. "  " .. d.metrics[1][2]) or "Telemetry unavailable"
+          text(leftX + 2, y + 1, first, leftW - 4, soft, bg)
+          if not wide and not compact then
+            local second = d.metrics[2] and (d.metrics[2][1] .. "  " .. d.metrics[2][2]) or ("ID " .. unit.address:sub(1, 8))
+            text(leftX + 2, y + 2, second, leftW - 4, soft, bg)
+          end
+          hits[#hits + 1] = { leftX, y, leftX + leftW - 1, math.min(bottom, y + cardH - 2), index }
+        end
+        if wide then
+          fill(rightX, top, rightW, panelH, panel)
+          fill(rightX, top, rightW, 1, 0x087986)
+          text(rightX + 1, top, "UNIT TELEMETRY", rightW - 2, WHITE, 0x087986)
+          local unit, d = units[selected], units[selected] and snapshots[units[selected].address]
+          if unit and d then
+            local statusColor = d.status == "ACTIVE" and GREEN or (d.status == "NO DATA" and RED or 0xFFD166)
+            text(rightX + 2, top + 2, unit.label, rightW - 4, cyan, panel)
+            text(rightX + 2, top + 3, "ID  " .. unit.address:sub(1, 8), rightW - 4, soft, panel)
+            text(rightX + 2, top + 4, "STATUS  " .. d.status, rightW - 4, statusColor, panel)
+            for i, m in ipairs(d.metrics) do
+              local y = top + 6 + i - 1
+              if y >= bottom then break end
+              text(rightX + 2, y, m[1], math.max(1, rightW - 16), soft, panel)
+              text(rightX + rightW - 13, y, m[2], 12, WHITE, panel)
+            end
+          end
+        end
+      end
+      bar(H, "Up/Down or touch: select   R: rescan   Q/Esc: close", GRAY, BLACK)
     end
-    draw()
+    local function refreshAndDraw()
+      refresh()
+      draw()
+    end
+    refreshAndDraw()
+    local nextRefresh = computer.uptime() + 2
     while true do
-      local e, _, ch, code = pull(1)
+      local e, _, ch, code = pull(0.25)
       if e == "key_down" then
         if ch == 113 or ch == 81 or ch == 27 or code == 1 then cls(); return
-        elseif ch == 114 or ch == 82 then scan(); draw()
-        elseif code == 200 then offset = math.max(0, offset - 1); draw()
-        elseif code == 208 then offset = math.min(math.max(0, #units - math.max(1, math.floor((H - 6) / 2))), offset + 1); draw() end
+        elseif ch == 114 or ch == 82 then refreshAndDraw(); nextRefresh = computer.uptime() + 2
+        elseif code == 200 then selected = math.max(1, selected - 1); draw()
+        elseif code == 208 then selected = math.min(#units, selected + 1); draw() end
       elseif e == "touch" then
-        if code <= math.floor(H / 2) then offset = math.max(0, offset - 1)
-        else offset = math.min(math.max(0, #units - math.max(1, math.floor((H - 6) / 2))), offset + 1) end
-        draw()
-      elseif not e then scan(); draw() end
+        for _, hit in ipairs(hits) do
+          if ch >= hit[1] and ch <= hit[3] and code >= hit[2] and code <= hit[4] then selected = hit[5]; draw(); break end
+        end
+      end
+      if computer.uptime() >= nextRefresh then
+        refreshAndDraw()
+        nextRefresh = computer.uptime() + 2
+      end
     end
-  end
-  local function buildIcons()
+  end  local function buildIcons()
     local icons = {
       { name = "ME Storage", box = 0x2060A0, glyph = "ME", app = "me" },
       { name = "Settings", box = GRAY, glyph = "SET", app = "settings" },
