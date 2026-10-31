@@ -7213,8 +7213,10 @@ end
     "ReactSLI inventories cards; OpenComputers has no shared-GPU SLI rendering API.")
 
   local function galleryApp()
-    local imageIndex, panicArmed = 1, false
-    local galleryOrder = { 1, 4, 5, 3, 6, 7, 8, 9 }
+    local imageIndex, panicArmed, unlockedImage = 1, false, nil
+    -- Keep ordinary pictures first; only the two existing inflation artworks are gated.
+    local galleryOrder = { 5, 3, 6, 7, 8, 9, 1, 4 }
+    local lockedImages = { [1] = true, [4] = true }
     local rainbow = { 0xFF4040, 0xFF9A24, 0xFFFF40, 0x40E060, 0x40BFFF, 0x9A60FF, 0xFF60C0 }
     local labels = {
       [1] = { "T H E O R G I N A L", true },
@@ -7241,6 +7243,64 @@ end
       local photoX = math.max(1, math.floor((W - maxW) / 2) + 1)
       sharedDrawGalleryImage(sourceIndex, photoX, 4, maxW, photoH)
       bar(H, "Left/Right: browse | Q/Esc: close", GRAY, BLACK)
+    end
+    local function passwordScreen()
+      local entered, message = "", nil
+      local gray, panel = 0x777777, 0x555555
+      local function put(y, value, fg)
+        if y < 1 or y > H then return end
+        value = tostring(value or "")
+        local x = math.max(1, math.floor((W - unicode.len(value)) / 2) + 1)
+        gpu.setForeground(fg or WHITE)
+        gpu.set(x, y, unicode.sub(value, 1, math.max(1, W - x + 1)))
+      end
+      while true do
+        gpu.setBackground(gray); gpu.setForeground(BLACK); gpu.fill(1, 1, W, H, " ")
+        local boxW, boxH = math.min(48, W - 2), math.min(13, H - 2)
+        local boxX, boxY = math.floor((W - boxW) / 2) + 1, math.floor((H - boxH) / 2) + 1
+        gpu.setBackground(panel); gpu.fill(boxX, boxY, boxW, boxH, " ")
+        gpu.setBackground(panel); gpu.setForeground(WHITE)
+        put(boxY + 1, "LOCKED", 0xFFFFFF)
+        if boxH <= 7 then
+          put(boxY + 2, "Please enter password", 0xFFFFFF)
+          put(boxY + 3, "PASSWORD: " .. string.rep("*", #entered), 0xFFFFFF)
+        else
+          put(boxY + 3, "Please enter password", 0xFFFFFF)
+          put(boxY + 5, "PASSWORD: " .. string.rep("*", #entered), 0xFFFFFF)
+          if message and boxH >= 10 then put(boxY + 7, message, RED) end
+        end
+        put(boxY + boxH - 2, "Enter: unlock   Backspace: erase", 0xFFFFFF)
+        put(boxY + boxH - 1, "Esc: back   Q: close gallery", 0xFFFFFF)
+        local ev, _, ch, code = pull()
+        if ev == "key_down" then
+          if ch == 113 or ch == 81 then return "quit"
+          elseif ch == 27 or code == 1 then return false
+          elseif ch == 13 or ch == 10 or code == 28 then
+            if entered == "4758" then return true end
+            entered, message = "", "Incorrect password. Try again."
+          elseif ch == 8 or code == 14 then
+            entered = entered:sub(1, -2); message = nil
+          elseif ch and ch >= 48 and ch <= 57 and #entered < 4 then
+            entered = entered .. string.char(ch); message = nil
+          end
+        end
+      end
+    end
+    local function visit(index)
+      local previous, previousUnlock = imageIndex, unlockedImage
+      imageIndex, panicArmed, unlockedImage = index, false, nil
+      local sourceIndex = galleryOrder[imageIndex]
+      if lockedImages[sourceIndex] then
+        local result = passwordScreen()
+        if result == "quit" then return "quit" end
+        if not result then
+          imageIndex, unlockedImage = previous, previousUnlock
+          draw()
+          return
+        end
+        unlockedImage = sourceIndex
+      end
+      draw()
     end
     local function showPanicAndBlueScreen()
       cls()
@@ -7280,13 +7340,11 @@ end
           if panicArmed then showPanicAndBlueScreen(); cls(); return
           else panicArmed = true; draw() end
         elseif code == 203 then
-          imageIndex = imageIndex == 1 and #galleryOrder or imageIndex - 1
-          panicArmed = false
-          draw()
+          local index = imageIndex == 1 and #galleryOrder or imageIndex - 1
+          if visit(index) == "quit" then cls(); return end
         elseif code == 205 then
-          imageIndex = imageIndex == #galleryOrder and 1 or imageIndex + 1
-          panicArmed = false
-          draw()
+          local index = imageIndex == #galleryOrder and 1 or imageIndex + 1
+          if visit(index) == "quit" then cls(); return end
         end
       end
     end
