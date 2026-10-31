@@ -6582,7 +6582,7 @@ end
     end
     local function readUnit(unit)
       local a, t = unit.address, unit.type
-      local d = { metrics = {}, status = "NO DATA", activity = 0 }
+      local d = { metrics = {}, warnings = {}, status = "NO DATA", activity = 0 }
       local function add(label, value, amount, maximum)
         d.metrics[#d.metrics + 1] = { label, tostring(value), tonumber(amount), tonumber(maximum) }
         if value ~= "?" then d.status = "STANDBY" end
@@ -6614,6 +6614,21 @@ end
         add("COLD COOLANT", (cold ~= nil or coldMax ~= nil) and ("COLD PERFLUOROMETHYL " .. fmt(cold) .. " mB") or "?", cold, coldMax)
         add("HOT COOLANT", (hot ~= nil or hotMax ~= nil) and ("PERFLUOROMETHYL " .. fmt(hot) .. " mB") or "?", hot, hotMax)
         add("FUEL USE", c and (fmt(c[1]) .. " mB/t") or "?", c and c[1])
+        if tonumber(hotMax) and tonumber(hotMax) > 0 and tonumber(hot) and hot / hotMax >= 0.90 then
+          d.warnings[#d.warnings + 1] = { "HOT PFM OVERFLOW RISK (90%+)", RED }
+        end
+        local lowFuel = false
+        for tank = 1, 3 do
+          local base = (tank - 1) * 3 + 1
+          local amount, maximum = tonumber(f and f[base]), tonumber(f and f[base + 1])
+          local fluid = d.fuelTypes[tank]
+          if fluid and fluid ~= "EMPTY" and fluid ~= "UNKNOWN FLUID" and maximum and maximum > 0 and amount and amount / maximum <= 0.10 then lowFuel = true end
+        end
+        if lowFuel then d.warnings[#d.warnings + 1] = { "LOW FUEL (10% OR LESS)", 0xFFD166 } end
+        if tonumber(capacity) and capacity > 0 and tonumber(stored) and stored / capacity <= 0.10 then
+          d.warnings[#d.warnings + 1] = { "LOW POWER (10% OR LESS)", 0xFFD166 }
+        end
+        if tonumber(cold) and cold <= 0 then d.warnings[#d.warnings + 1] = { "NO COLD PERFLUOROMETHYL", RED } end
         d.activity = (tonumber(p and p[1]) or 0) + (tonumber(k and k[1]) or 0) + (tonumber(progress and progress[1]) or 0)
       elseif t == "ntm_fusion_klystron" then
         local o, e, air = call(a, "getOutput"), call(a, "getEnergyInfo"), call(a, "getAir")
@@ -6663,6 +6678,7 @@ end
         d.activity = tonumber(power and power[1]) or 0
       end
       if d.activity > 0 then d.status = "ACTIVE" end
+      if #d.warnings > 0 then d.status = "WARNING" end
       snapshots[unit.address] = d
     end
     local function refresh()
@@ -6755,8 +6771,8 @@ end
           local col, row = (slot - 1) % cols, math.floor((slot - 1) / cols)
           local x, y = 2 + col * (cellW + gap), gridTop + row * cardH
           local d = snapshots[unit.address] or { status = "NO DATA" }
-          local statusColor = d.status == "ACTIVE" and GREEN or (d.status == "NO DATA" and RED or 0xFFD166)
-          local inner = d.status == "ACTIVE" and 0x12352B or (d.status == "NO DATA" and 0x3A1C20 or 0x342D19)
+          local statusColor = (d.status == "ACTIVE" and GREEN) or ((d.status == "NO DATA" or d.status == "WARNING") and RED or 0xFFD166)
+          local inner = d.status == "ACTIVE" and 0x12352B or ((d.status == "NO DATA" or d.status == "WARNING") and 0x3A1C20 or 0x342D19)
           fill(x, y, cellW, cardH - 1, statusColor)
           fill(x + 1, y + 1, math.max(1, cellW - 2), 2, inner)
           local title = unicode.sub(unit.label, 1, math.max(1, cellW - 2))
@@ -6772,6 +6788,11 @@ end
         local heading = unit and ("GAUGES  /  " .. unit.label .. "  /  " .. d.status) or "GAUGES  /  NO UNITS DETECTED"
         fill(2, gaugeTop - 1, W - 3, H - gaugeTop, panel)
         text(3, gaugeTop - 1, heading, W - 5, cyan, panel)
+        if d and #d.warnings > 0 then
+          local labels = {}
+          for i, warning in ipairs(d.warnings) do labels[i] = warning[1] end
+          text(3, gaugeTop, "WARN: " .. table.concat(labels, " | "), W - 5, RED, panel)
+        end
         local meters = {}
         if d then
           for _, m in ipairs(d.metrics or {}) do
@@ -6779,12 +6800,12 @@ end
           end
         end
         if #meters == 0 then
-          text(3, gaugeTop, "No bounded tank or energy gauge reported for this unit.", W - 5, soft, panel)
+          if not d or #d.warnings == 0 then text(3, gaugeTop, "No bounded tank or energy gauge reported for this unit.", W - 5, soft, panel) end
         else
           local meterCount = math.min(3, #meters)
           local labelW, barW = math.min(19, math.max(10, math.floor(W * 0.27))), math.max(8, math.floor(W * 0.34))
           for i = 1, meterCount do
-            local m, y = meters[i], gaugeTop + i - 1
+            local m, y = meters[i], gaugeTop + i
             local x = 3
             local ratio = math.max(0, math.min(1, m[3] / m[4]))
             text(x, y, m[1], labelW, soft, panel)
@@ -6795,7 +6816,7 @@ end
             text(valueX, y, fmt(m[3]) .. " / " .. fmt(m[4]), math.max(1, W - valueX - 1), WHITE, panel)
           end
         end
-        bar(H, "Click an annunciator or use Up/Down | G: system page | Q: close", GRAY, BLACK)
+        bar(H, "HOT >=90% | FUEL/POWER <=10% | COLD PFM = 0 | G: system | Q: close", GRAY, BLACK)
         return
       end
 
@@ -6829,7 +6850,7 @@ end
           local y = listTop + (row - 1) * cardH
           local d = snapshots[unit.address] or { metrics = {}, status = "NO DATA" }
           local bg = index == selected and raised or panel
-          local statusColor = d.status == "ACTIVE" and GREEN or (d.status == "NO DATA" and RED or 0xFFD166)
+          local statusColor = (d.status == "ACTIVE" and GREEN) or ((d.status == "NO DATA" or d.status == "WARNING") and RED or 0xFFD166)
           fill(leftX + 1, y, leftW - 2, cardH - 1, bg)
           text(leftX + 2, y, unit.label, math.max(1, leftW - 13), index == selected and cyan or WHITE, bg)
           text(leftX + leftW - 10, y, d.status, 9, statusColor, bg)
@@ -6869,10 +6890,11 @@ end
           text(rightX + 1, top, "UNIT TELEMETRY", rightW - 2, WHITE, 0x087986)
           local unit, d = units[selected], units[selected] and snapshots[units[selected].address]
           if unit and d then
-            local statusColor = d.status == "ACTIVE" and GREEN or (d.status == "NO DATA" and RED or 0xFFD166)
+            local statusColor = (d.status == "ACTIVE" and GREEN) or ((d.status == "NO DATA" or d.status == "WARNING") and RED or 0xFFD166)
             text(rightX + 2, top + 2, unit.label, rightW - 4, cyan, panel)
             text(rightX + 2, top + 3, "ID  " .. unit.address:sub(1, 8), rightW - 4, soft, panel)
-            text(rightX + 2, top + 4, "STATUS  " .. d.status, rightW - 4, statusColor, panel)
+            local statusText = d.status == "WARNING" and ("STATUS  WARNING / " .. #d.warnings .. " ALERTS") or ("STATUS  " .. d.status)
+            text(rightX + 2, top + 4, statusText, rightW - 4, statusColor, panel)
             local isKlystron = unit.type == "ntm_fusion_klystron"
             local detailBottom = bottom - (isKlystron and 3 or 0)
             local valueW = math.min(26, math.max(12, rightW - 19))
