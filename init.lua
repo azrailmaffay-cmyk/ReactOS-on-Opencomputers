@@ -6569,9 +6569,15 @@ end
       return unicode.sub(tostring(v or "?"), 1, width or 12)
     end
     local function fluidName(v, fallback)
-      local name = tostring(v or "")
+      local name
+      if type(v) == "table" then name = tostring(v.name or v.fluidName or v.id or v.registryName or "")
+      else name = tostring(v or "") end
+      name = name:gsub("^%s+", ""):gsub("%s+$", "")
+      name = name:gsub("^[Hh][Bb][Mm][Ff][Ll][Uu][Ii][Dd][%.:]", "")
+      name = name:gsub("_", " "):gsub("%.", " ")
+      if name:lower() == "hbmfluid" then name = "UNKNOWN FLUID" end
       if name == "" then return fallback or "EMPTY" end
-      return short(name, 16)
+      return short(string.upper(name), 20)
     end
     local function readUnit(unit)
       local a, t = unit.address, unit.type
@@ -6583,7 +6589,7 @@ end
       if t == "ntm_fusion_torus" then
         local e, f = call(a, "getEnergyInfo"), call(a, "getFluid")
         local k, p, c = call(a, "getKlystronEnergy"), call(a, "getPlasmaEnergy"), call(a, "getFuelConsumption")
-        local progress = call(a, "getRecipeProgress")
+        local progress, coolant = call(a, "getRecipeProgress"), call(a, "getCoolant")
         d.fuelTypes = { fluidName(f and f[3]), fluidName(f and f[6]), fluidName(f and f[9]), fluidName(f and f[12]) }
         add("PERF PROGRESS", progress and (fmt(progress[1]) .. " + BONUS " .. fmt(progress[2])) or "?", progress and progress[1])
         add("PLASMA OUTPUT", p and (fmt(p[1]) .. " TU/t") or "?", p and p[1])
@@ -6593,6 +6599,8 @@ end
         add("FUEL 2", f and (d.fuelTypes[2] .. " " .. fmt(f[4]) .. " mB") or "?", f and f[4], f and f[5])
         add("FUEL 3", f and (d.fuelTypes[3] .. " " .. fmt(f[7]) .. " mB") or "?", f and f[7], f and f[8])
         add("OUTPUT FLUID", f and (d.fuelTypes[4] .. " " .. fmt(f[10]) .. " mB") or "?", f and f[10], f and f[11])
+        add("COLD COOLANT", coolant and ("PERFLUOROMETHYL " .. fmt(coolant[1]) .. " mB") or "?", coolant and coolant[1], coolant and coolant[2])
+        add("HOT COOLANT", coolant and ("PERFLUOROMETHYL " .. fmt(coolant[3]) .. " mB") or "?", coolant and coolant[3], coolant and coolant[4])
         add("FUEL USE", c and (fmt(c[1]) .. " mB/t") or "?", c and c[1])
         d.activity = (tonumber(p and p[1]) or 0) + (tonumber(k and k[1]) or 0) + (tonumber(progress and progress[1]) or 0)
       elseif t == "ntm_fusion_klystron" then
@@ -6707,7 +6715,7 @@ end
 
       local top, bottom = compact and 5 or 9, H - 1
       local panelH = math.max(1, bottom - top + 1)
-      local wide = W >= 74 and panelH >= 8
+      local wide = W >= 74 and panelH >= 12
       local leftX, leftW, rightX, rightW = 2, W - 3, nil, 0
       if wide then
         leftW = math.floor((W - 5) * 0.40)
@@ -6741,7 +6749,7 @@ end
           text(leftX + leftW - 10, y, d.status, 9, statusColor, bg)
           local first
           if unit.type == "ntm_fusion_torus" then
-            first = d.fuelTypes and ("FUEL: " .. d.fuelTypes[1] .. " / " .. d.fuelTypes[2] .. " / " .. d.fuelTypes[3]) or "Fuel telemetry unavailable"
+            first = d.fuelTypes and ("FUEL: " .. d.fuelTypes[1] .. " / " .. d.fuelTypes[2] .. " / " .. d.fuelTypes[3] .. " | PFM COOLANT") or "Fuel telemetry unavailable"
           elseif unit.type == "ntm_fusion_breeder" then
             first = d.fuelTypes and ("FLUID: " .. d.fuelTypes[1] .. " > " .. d.fuelTypes[2]) or "Fluid telemetry unavailable"
           elseif unit.type == "ntm_fusion_boiler" then
@@ -6784,7 +6792,7 @@ end
             local valueW = math.min(26, math.max(12, rightW - 19))
             local labelW = math.max(1, rightW - valueW - 4)
             for i, m in ipairs(d.metrics) do
-              local y = top + 6 + i - 1
+              local y = top + 5 + i - 1
               if y > detailBottom then break end
               text(rightX + 2, y, m[1], labelW, soft, panel)
               text(rightX + 4 + labelW, y, m[2], valueW, WHITE, panel)
