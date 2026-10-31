@@ -6543,6 +6543,112 @@ end
   end
   def("rbmk", "rbmk", "Launch the RBMK reactor control console", launchRbmk,
     "Open the RBMK control dashboard. Press Q in the dashboard to return.")
+  local function fusionApp()
+    local kinds = {
+      { "ntm_fusion_torus", "PLASMA VESSEL" },
+      { "ntm_fusion_klystron", "KLYSTRON" },
+      { "ntm_fusion_boiler", "BOILER" },
+      { "ntm_fusion_mhdt", "MHD TURBINE" },
+      { "ntm_fusion_breeder", "BREEDING CHAMBER" },
+    }
+    local units, offset = {}, 0
+    local function scan()
+      units = {}
+      for _, item in ipairs(kinds) do
+        for _, address in ipairs(componentAddresses(item[1])) do
+          units[#units + 1] = { type = item[1], label = item[2], address = address }
+        end
+      end
+    end
+    scan()
+    local function call(address, method)
+      local result = { n = 0 }
+      local function capture(...)
+        result.n = select("#", ...)
+        for i = 1, result.n do result[i] = select(i, ...) end
+      end
+      local ok = pcall(function() capture(component.invoke(address, method)) end)
+      if not ok then return nil end
+      return result
+    end
+    local function number(value)
+      local n = tonumber(value)
+      return n and commas(math.floor(n + 0.5)) or "?"
+    end
+    local function describe(unit)
+      local t, a = unit.type, unit.address
+      if t == "ntm_fusion_torus" then
+        local e, f = call(a, "getEnergyInfo"), call(a, "getFluid")
+        local k, p, c = call(a, "getKlystronEnergy"), call(a, "getPlasmaEnergy"), call(a, "getFuelConsumption")
+        return "HE " .. (e and number(e[1]) .. "/" .. number(e[2]) or "?")
+          .. "  " .. (f and tostring(f[3] or "Fuel1") or "Fuel1") .. " " .. (f and number(f[1]) or "?")
+          .. "  " .. (f and tostring(f[6] or "Fuel2") or "Fuel2") .. " " .. (f and number(f[4]) or "?")
+          .. "  KYU " .. (k and number(k[1]) or "?") .. "  TU " .. (p and number(p[1]) or "?")
+          .. "  FUEL " .. (c and number(c[1]) or "?") .. "/t"
+      elseif t == "ntm_fusion_klystron" then
+        local o, e = call(a, "getOutput"), call(a, "getEnergyInfo")
+        return "OUTPUT " .. (o and number(o[1]) .. "/" .. number(o[2]) .. " KYU/t" or "?")
+          .. "  HE " .. (e and number(e[1]) .. "/" .. number(e[2]) or "?")
+      elseif t == "ntm_fusion_boiler" then
+        local p, f = call(a, "getPlasmaEnergy"), call(a, "getFluid")
+        return "PLASMA " .. (p and number(p[1]) or "?") .. " TU  WATER "
+          .. (f and number(f[1]) .. "/" .. number(f[2]) or "?") .. "  STEAM "
+          .. (f and number(f[3]) .. "/" .. number(f[4]) or "?")
+      elseif t == "ntm_fusion_mhdt" then
+        local e, p = call(a, "getEnergyInfo"), call(a, "getPlasmaEnergy")
+        local c = call(a, "getCoolant")
+        return "BUFFER " .. (e and number(e[1]) or "?") .. " HE  PLASMA "
+          .. (p and number(p[1]) or "?") .. " TU  COOLANT "
+          .. (c and number(c[1]) .. "/" .. number(c[2]) or "?")
+      else
+        local n, progress = call(a, "getNeutronEnergy"), call(a, "getProgress")
+        local f, slots = call(a, "getFluid"), call(a, "getCrafting")
+        local function short(v) return unicode.sub(tostring(v or "?"), 1, 9) end
+        local slot1 = slots and (short(slots[2] or "Empty") .. "x" .. tostring(slots[1] or 0)) or "?"
+        local slot2 = slots and (short(slots[4] or "Empty") .. "x" .. tostring(slots[3] or 0)) or "?"
+        return "N " .. (n and number(n[1]) or "?") .. " P " .. (progress and number(progress[1]) or "?")
+          .. " IN " .. (f and short(f[3]) .. ":" .. number(f[1]) or "?")
+          .. " OUT " .. (f and short(f[6]) .. ":" .. number(f[4]) or "?")
+          .. " S1 " .. slot1 .. " S2 " .. slot2
+      end
+    end
+    local function draw()
+      cls(); bar(1, "Fusion Monitor | connected NTM fusion components", GRAY, BLACK)
+      color(BG, FG)
+      gpu.set(2, 2, "Read-only live telemetry  |  Units detected: " .. tostring(#units))
+      local visible = math.max(1, math.floor((H - 6) / 2))
+      if #units == 0 then
+        gpu.set(2, 4, "No ntm_fusion_* components found on this computer network.")
+        gpu.set(2, 6, "Connect OC cables to a fusion vessel, klystron, boiler, turbine, or breeder.")
+      else
+        offset = math.max(0, math.min(offset, math.max(0, #units - visible)))
+        for row = 1, visible do
+          local unit = units[offset + row]
+          if not unit then break end
+          local y = row + 3
+          color(GRAY, BLACK); gpu.fill(2, y, math.max(1, W - 3), 1, " ")
+          gpu.set(3, y, unicode.sub(unit.label .. "  " .. unit.address:sub(1, 8), 1, math.max(1, W - 5)))
+          color(BG, FG)
+          gpu.set(4, y + 1, unicode.sub(describe(unit), 1, math.max(1, W - 6)))
+        end
+      end
+      bar(H, "Up/Down: scroll | R: refresh | Q/Esc: close", GRAY, BLACK)
+    end
+    draw()
+    while true do
+      local e, _, ch, code = pull(1)
+      if e == "key_down" then
+        if ch == 113 or ch == 81 or ch == 27 or code == 1 then cls(); return
+        elseif ch == 114 or ch == 82 then scan(); draw()
+        elseif code == 200 then offset = math.max(0, offset - 1); draw()
+        elseif code == 208 then offset = math.min(math.max(0, #units - math.max(1, math.floor((H - 6) / 2))), offset + 1); draw() end
+      elseif e == "touch" then
+        if code <= math.floor(H / 2) then offset = math.max(0, offset - 1)
+        else offset = math.min(math.max(0, #units - math.max(1, math.floor((H - 6) / 2))), offset + 1) end
+        draw()
+      elseif not e then scan(); draw() end
+    end
+  end
   local function buildIcons()
     local icons = {
       { name = "ME Storage", box = 0x2060A0, glyph = "ME", app = "me" },
@@ -6551,6 +6657,7 @@ end
       { name = "Terminal", box = 0x000000, glyph = ">_", fg = 0x00FF00, app = "terminal" },
       { name = "Messages", box = 0x205030, glyph = "MSG", fg = 0xFFFFFF, app = "messages" },
       { name = "RBMK Console", box = 0x802020, glyph = "RBMK", fg = 0xFFFFFF, app = "rbmk" },
+      { name = "Fusion Monitor", box = 0x205868, glyph = "FUSION", fg = 0xFFFFFF, app = "fusion" },
       { name = "ReactX", box = 0x203878, glyph = "DX", fg = 0xFFFFFF, app = "reactx" },
       { name = "ReactSLI", box = 0x604080, glyph = "SLI", fg = 0xFFFFFF, app = "reactsli" },
     }
@@ -6564,6 +6671,7 @@ end
   local function startMenu()
     local items = {
       { label = "ME Storage", app = "me" }, { label = "RBMK Console", app = "rbmk" },
+      { label = "Fusion Monitor", app = "fusion" },
       { label = "ReactX", app = "reactx" }, { label = "ReactSLI", app = "reactsli" },
       { label = "Settings", app = "settings" }, { label = "Notepad", app = "notepad" },
       { label = "Messages", app = "messages" },
@@ -6630,7 +6738,7 @@ end
     local hits, startBtn, done, ICONS = {}, nil, false, nil
     local appNames = {
       me = "ME Storage", rs = "RS Storage", settings = "Settings", notepad = "Notepad",
-      terminal = "Terminal", rbmk = "RBMK Console", reactx = "ReactX", reactsli = "ReactSLI", music = "Music Player",
+      terminal = "Terminal", rbmk = "RBMK Console", fusion = "Fusion Monitor", reactx = "ReactX", reactsli = "ReactSLI", music = "Music Player",
       gallery = "Gallery", messages = "Messages", credits = "Credits",
     }
     local function draw()
@@ -6670,6 +6778,7 @@ end
       elseif app == "gallery" then sharedGalleryApp()
       elseif app == "credits" then creditsApp()
       elseif app == "rbmk" then launchRbmk()
+      elseif app == "fusion" then fusionApp()
       elseif app == "reactx" then sharedReactXApp()
       elseif app == "reactsli" then sharedReactSliApp()
       elseif app == "settings" then settingsApp()
