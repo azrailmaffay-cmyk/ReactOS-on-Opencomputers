@@ -6576,13 +6576,17 @@ end
       if t == "ntm_fusion_torus" then
         local e, f = call(a, "getEnergyInfo"), call(a, "getFluid")
         local k, p, c = call(a, "getKlystronEnergy"), call(a, "getPlasmaEnergy"), call(a, "getFuelConsumption")
+        local progress = call(a, "getRecipeProgress")
+        d.fuelTypes = { short(f and f[3] or "?", 10), short(f and f[6] or "?", 10) }
+        add("PERF LEVEL / PROGRESS", progress and fmt(progress[1]) or "?", progress and progress[1])
+        add("COLLECTOR BONUS", progress and fmt(progress[2]) or "?", progress and progress[2])
         add("PLASMA OUTPUT", p and (fmt(p[1]) .. " TU/t") or "?", p and p[1])
         add("KLYSTRON INPUT", k and (fmt(k[1]) .. " KYU/t") or "?", k and k[1])
         add("ENERGY BUFFER", e and (fmt(e[1]) .. " / " .. fmt(e[2]) .. " HE") or "?", e and e[1], e and e[2])
-        add(short(f and f[3] or "FUEL 1", 12), f and (fmt(f[1]) .. " mB") or "?", f and f[1], f and f[2])
-        add(short(f and f[6] or "FUEL 2", 12), f and (fmt(f[4]) .. " mB") or "?", f and f[4], f and f[5])
+        add("FUEL TYPE 1", f and (short(f[3], 12) .. "  " .. fmt(f[1]) .. " mB") or "?", f and f[1], f and f[2])
+        add("FUEL TYPE 2", f and (short(f[6], 12) .. "  " .. fmt(f[4]) .. " mB") or "?", f and f[4], f and f[5])
         add("FUEL USE", c and (fmt(c[1]) .. " mB/t") or "?", c and c[1])
-        d.activity = (tonumber(p and p[1]) or 0) + (tonumber(k and k[1]) or 0)
+        d.activity = (tonumber(p and p[1]) or 0) + (tonumber(k and k[1]) or 0) + (tonumber(progress and progress[1]) or 0)
       elseif t == "ntm_fusion_klystron" then
         local o, e, air = call(a, "getOutput"), call(a, "getEnergyInfo"), call(a, "getAir")
         add("OUTPUT", o and (fmt(o[1]) .. " / " .. fmt(o[2]) .. " KYU/t") or "?", o and o[1], o and o[2])
@@ -6709,7 +6713,12 @@ end
           fill(leftX + 1, y, leftW - 2, cardH - 1, bg)
           text(leftX + 2, y, unit.label, math.max(1, leftW - 13), index == selected and cyan or WHITE, bg)
           text(leftX + leftW - 10, y, d.status, 9, statusColor, bg)
-          local first = d.metrics[1] and (d.metrics[1][1] .. "  " .. d.metrics[1][2]) or "Telemetry unavailable"
+          local first
+          if unit.type == "ntm_fusion_torus" then
+            first = d.fuelTypes and ("FUEL: " .. d.fuelTypes[1] .. " + " .. d.fuelTypes[2]) or "Fuel telemetry unavailable"
+          else
+            first = d.metrics[1] and (d.metrics[1][1] .. "  " .. d.metrics[1][2]) or "Telemetry unavailable"
+          end
           text(leftX + 2, y + 1, first, leftW - 4, soft, bg)
           if not wide and not compact then
             local second = d.metrics[2] and (d.metrics[2][1] .. "  " .. d.metrics[2][2]) or ("ID " .. unit.address:sub(1, 8))
