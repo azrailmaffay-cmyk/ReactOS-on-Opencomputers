@@ -6552,8 +6552,9 @@ end
       { "ntm_fusion_breeder", "BREEDING CHAMBER" },
       { "ntm_icf_reactor", "ICF REACTOR" },
     }
-    local units, snapshots, hits, sliderHit = {}, {}, {}, nil
+    local units, snapshots, hits, sliderHit, tabHits = {}, {}, {}, nil, {}
     local controlMessage, controlError
+    local page = 1
     local selected, offset = 1, 0
     local function call(address, method)
       local result = {}
@@ -6589,18 +6590,29 @@ end
       if t == "ntm_fusion_torus" then
         local e, f = call(a, "getEnergyInfo"), call(a, "getFluid")
         local k, p, c = call(a, "getKlystronEnergy"), call(a, "getPlasmaEnergy"), call(a, "getFuelConsumption")
-        local progress, coolant = call(a, "getRecipeProgress"), call(a, "getCoolant")
+        local progress, coolant, info = call(a, "getRecipeProgress"), call(a, "getCoolant"), call(a, "getInfo")
+        -- Some NTM builds report stale zeroes from the individual getter while
+        -- getInfo() already contains the current tank and energy values.
+        local function current(primary, combined)
+          local p, c = tonumber(primary), tonumber(combined)
+          if (p == nil or p == 0) and c and c > 0 then return c end
+          return primary
+        end
+        local stored = current(e and e[1], info and info[1])
+        local capacity = current(e and e[2], info and info[2])
+        local cold, coldMax = current(coolant and coolant[1], info and info[15]), current(coolant and coolant[2], info and info[16])
+        local hot, hotMax = current(coolant and coolant[3], info and info[17]), current(coolant and coolant[4], info and info[18])
         d.fuelTypes = { fluidName(f and f[3]), fluidName(f and f[6]), fluidName(f and f[9]), fluidName(f and f[12]) }
         add("PERF PROGRESS", progress and (fmt(progress[1]) .. " + BONUS " .. fmt(progress[2])) or "?", progress and progress[1])
         add("PLASMA OUTPUT", p and (fmt(p[1]) .. " TU/t") or "?", p and p[1])
         add("KLYSTRON INPUT", k and (fmt(k[1]) .. " KYU/t") or "?", k and k[1])
-        add("ENERGY BUFFER", e and (fmt(e[1]) .. " / " .. fmt(e[2]) .. " HE") or "?", e and e[1], e and e[2])
+        add("ENERGY BUFFER", (stored ~= nil or capacity ~= nil) and (fmt(stored) .. " / " .. fmt(capacity) .. " HE") or "?", stored, capacity)
         add("FUEL 1", f and (d.fuelTypes[1] .. " " .. fmt(f[1]) .. " mB") or "?", f and f[1], f and f[2])
         add("FUEL 2", f and (d.fuelTypes[2] .. " " .. fmt(f[4]) .. " mB") or "?", f and f[4], f and f[5])
         add("FUEL 3", f and (d.fuelTypes[3] .. " " .. fmt(f[7]) .. " mB") or "?", f and f[7], f and f[8])
         add("OUTPUT FLUID", f and (d.fuelTypes[4] .. " " .. fmt(f[10]) .. " mB") or "?", f and f[10], f and f[11])
-        add("COLD COOLANT", coolant and ("PERFLUOROMETHYL " .. fmt(coolant[1]) .. " mB") or "?", coolant and coolant[1], coolant and coolant[2])
-        add("HOT COOLANT", coolant and ("PERFLUOROMETHYL " .. fmt(coolant[3]) .. " mB") or "?", coolant and coolant[3], coolant and coolant[4])
+        add("COLD COOLANT", (cold ~= nil or coldMax ~= nil) and ("COLD PERFLUOROMETHYL " .. fmt(cold) .. " mB") or "?", cold, coldMax)
+        add("HOT COOLANT", (hot ~= nil or hotMax ~= nil) and ("PERFLUOROMETHYL " .. fmt(hot) .. " mB") or "?", hot, hotMax)
         add("FUEL USE", c and (fmt(c[1]) .. " mB/t") or "?", c and c[1])
         d.activity = (tonumber(p and p[1]) or 0) + (tonumber(k and k[1]) or 0) + (tonumber(progress and progress[1]) or 0)
       elseif t == "ntm_fusion_klystron" then
@@ -6683,12 +6695,25 @@ end
       cls()
       local dark, panel, raised, cyan, soft = 0x0A1218, 0x14212B, 0x1D303B, 0x36D6D6, 0xAFC2CB
       sliderHit = nil
+      hits = {}
+      tabHits = {}
       fill(1, 1, W, 1, dark)
       text(2, 1, "REACTOS  /  FUSION CONTROL", math.max(1, W - 20), cyan, dark)
       text(math.max(1, W - 16), 1, "LIVE", math.min(14, W), GREEN, dark)
       fill(1, 2, W, 2, 0x101A22)
       text(2, 2, "NTM FUSION ARRAY", W - 3, WHITE, 0x101A22)
-      text(2, 3, "Read-only telemetry   |   Auto refresh: 2 sec", W - 3, soft, 0x101A22)
+      text(2, 3, "Read-only telemetry   |   Refresh: 2 sec", math.max(1, W - 24), soft, 0x101A22)
+      tabHits = {}
+      local tabs = { { "SYSTEM", 1 }, { "GAUGES", 2 } }
+      local tx = math.max(2, W - 21)
+      for _, tab in ipairs(tabs) do
+        local label = "[ " .. tab[1] .. " ]"
+        local tw = unicode.len(label)
+        local active = page == tab[2]
+        text(tx, 3, label, tw, active and cyan or soft, 0x101A22)
+        tabHits[#tabHits + 1] = { tx, tx + tw - 1, tab[2] }
+        tx = tx + tw + 1
+      end
 
       local vessels, klystrons, support, breeders = 0, 0, 0, 0
       for _, unit in ipairs(units) do
@@ -6711,6 +6736,67 @@ end
           text(x + 1, tileY, tile[1], tileW - 2, soft, panel)
           text(x + 1, tileY + 1, tostring(tile[2]), tileW - 2, tile[3], panel)
         end
+      end
+
+      if page == 2 then
+        local unitCount = #units
+        local cols = W >= 100 and 4 or (W >= 66 and 3 or 2)
+        local gridTop, gaugeTop = 9, H - 5
+        local cardH, gap = 4, 1
+        local rows = math.max(1, math.floor((gaugeTop - gridTop) / (cardH + gap)))
+        local pageSize = cols * rows
+        local start = math.max(1, math.min(selected - math.floor(pageSize / 2), math.max(1, unitCount - pageSize + 1)))
+        offset = start - 1
+        local cellW = math.max(1, math.floor((W - 4 - gap * (cols - 1)) / cols))
+        for slot = 1, pageSize do
+          local index = start + slot - 1
+          local unit = units[index]
+          if not unit then break end
+          local col, row = (slot - 1) % cols, math.floor((slot - 1) / cols)
+          local x, y = 2 + col * (cellW + gap), gridTop + row * cardH
+          local d = snapshots[unit.address] or { status = "NO DATA" }
+          local statusColor = d.status == "ACTIVE" and GREEN or (d.status == "NO DATA" and RED or 0xFFD166)
+          local inner = d.status == "ACTIVE" and 0x12352B or (d.status == "NO DATA" and 0x3A1C20 or 0x342D19)
+          fill(x, y, cellW, cardH - 1, statusColor)
+          fill(x + 1, y + 1, math.max(1, cellW - 2), 2, inner)
+          local title = unicode.sub(unit.label, 1, math.max(1, cellW - 2))
+          local titleX = x + math.max(1, math.floor((cellW - unicode.len(title)) / 2))
+          text(titleX, y + 1, title, unicode.len(title), WHITE, inner)
+          local state = "[ " .. d.status .. " ]"
+          state = unicode.sub(state, 1, math.max(1, cellW - 2))
+          local stateX = x + math.max(1, math.floor((cellW - unicode.len(state)) / 2))
+          text(stateX, y + 2, state, unicode.len(state), statusColor, inner)
+          hits[#hits + 1] = { x, y, x + cellW - 1, y + cardH - 2, index }
+        end
+        local unit, d = units[selected], units[selected] and snapshots[units[selected].address]
+        local heading = unit and ("GAUGES  /  " .. unit.label .. "  /  " .. d.status) or "GAUGES  /  NO UNITS DETECTED"
+        fill(2, gaugeTop - 1, W - 3, H - gaugeTop, panel)
+        text(3, gaugeTop - 1, heading, W - 5, cyan, panel)
+        local meters = {}
+        if d then
+          for _, m in ipairs(d.metrics or {}) do
+            if m[3] and m[4] and m[4] > 0 then meters[#meters + 1] = m end
+          end
+        end
+        if #meters == 0 then
+          text(3, gaugeTop, "No bounded tank or energy gauge reported for this unit.", W - 5, soft, panel)
+        else
+          local meterCount = math.min(3, #meters)
+          local labelW, barW = math.min(19, math.max(10, math.floor(W * 0.27))), math.max(8, math.floor(W * 0.34))
+          for i = 1, meterCount do
+            local m, y = meters[i], gaugeTop + i - 1
+            local x = 3
+            local ratio = math.max(0, math.min(1, m[3] / m[4]))
+            text(x, y, m[1], labelW, soft, panel)
+            local bx = x + labelW + 1
+            fill(bx, y, barW, 1, 0x263742)
+            fill(bx, y, math.floor(barW * ratio), 1, ratio >= 0.9 and 0xFF9B62 or cyan)
+            local valueX = bx + barW + 1
+            text(valueX, y, fmt(m[3]) .. " / " .. fmt(m[4]), math.max(1, W - valueX - 1), WHITE, panel)
+          end
+        end
+        bar(H, "Click an annunciator or use Up/Down | G: system page | Q: close", GRAY, BLACK)
+        return
       end
 
       local top, bottom = compact and 5 or 9, H - 1
@@ -6810,7 +6896,7 @@ end
           end
         end
       end
-      bar(H, "Select unit | Klystron: slider or Left/Right +/-5% | Q: close", GRAY, BLACK)
+      bar(H, "Select unit | G: gauges | Klystron: slider or Left/Right +/-5% | Q: close", GRAY, BLACK)
     end
     local nextRefresh = computer.uptime() + 2
     local function refreshAndDraw()
@@ -6834,6 +6920,7 @@ end
       if e == "key_down" then
         if ch == 113 or ch == 81 or ch == 27 or code == 1 then cls(); return
         elseif ch == 114 or ch == 82 then refreshAndDraw(); nextRefresh = computer.uptime() + 2
+        elseif ch == 103 or ch == 71 then page = page == 1 and 2 or 1; draw()
         elseif code == 200 then selected = math.max(1, selected - 1); draw()
         elseif code == 208 then selected = math.min(#units, selected + 1); draw()
         elseif code == 203 and units[selected] and units[selected].type == "ntm_fusion_klystron" then
@@ -6842,7 +6929,13 @@ end
           setOutputPercent((snapshots[units[selected].address].targetPercent or 0) + 5)
         end
       elseif e == "touch" then
-        if sliderHit and ch >= sliderHit[1] and ch <= sliderHit[2] and code == sliderHit[3] then
+        local tabSelected = false
+        for _, tab in ipairs(tabHits) do
+          if ch >= tab[1] and ch <= tab[2] and code == 3 then page = tab[3]; draw(); tabSelected = true; break end
+        end
+        if tabSelected then
+          -- Page tabs are separate from the klystron slider and unit cards.
+        elseif sliderHit and ch >= sliderHit[1] and ch <= sliderHit[2] and code == sliderHit[3] then
           local ratio = (sliderHit[2] == sliderHit[1]) and 0 or ((ch - sliderHit[1]) / (sliderHit[2] - sliderHit[1]))
           setOutputPercent(math.floor(ratio * 100 + 0.5))
         else
