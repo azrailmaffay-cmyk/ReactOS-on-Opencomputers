@@ -6550,8 +6550,10 @@ end
       { "ntm_fusion_boiler", "BOILER" },
       { "ntm_fusion_mhdt", "MHD TURBINE" },
       { "ntm_fusion_breeder", "BREEDING CHAMBER" },
+      { "ntm_icf_reactor", "ICF REACTOR" },
     }
-    local units, snapshots, hits = {}, {}, {}
+    local units, snapshots, hits, sliderHit = {}, {}, {}, nil
+    local controlMessage, controlError
     local selected, offset = 1, 0
     local function call(address, method)
       local result = {}
@@ -6566,6 +6568,11 @@ end
     local function short(v, width)
       return unicode.sub(tostring(v or "?"), 1, width or 12)
     end
+    local function fluidName(v, fallback)
+      local name = tostring(v or "")
+      if name == "" then return fallback or "EMPTY" end
+      return short(name, 16)
+    end
     local function readUnit(unit)
       local a, t = unit.address, unit.type
       local d = { metrics = {}, status = "NO DATA", activity = 0 }
@@ -6577,18 +6584,21 @@ end
         local e, f = call(a, "getEnergyInfo"), call(a, "getFluid")
         local k, p, c = call(a, "getKlystronEnergy"), call(a, "getPlasmaEnergy"), call(a, "getFuelConsumption")
         local progress = call(a, "getRecipeProgress")
-        d.fuelTypes = { short(f and f[3] or "?", 10), short(f and f[6] or "?", 10) }
-        add("PERF LEVEL / PROGRESS", progress and fmt(progress[1]) or "?", progress and progress[1])
-        add("COLLECTOR BONUS", progress and fmt(progress[2]) or "?", progress and progress[2])
+        d.fuelTypes = { fluidName(f and f[3]), fluidName(f and f[6]), fluidName(f and f[9]), fluidName(f and f[12]) }
+        add("PERF PROGRESS", progress and (fmt(progress[1]) .. " + BONUS " .. fmt(progress[2])) or "?", progress and progress[1])
         add("PLASMA OUTPUT", p and (fmt(p[1]) .. " TU/t") or "?", p and p[1])
         add("KLYSTRON INPUT", k and (fmt(k[1]) .. " KYU/t") or "?", k and k[1])
         add("ENERGY BUFFER", e and (fmt(e[1]) .. " / " .. fmt(e[2]) .. " HE") or "?", e and e[1], e and e[2])
-        add("FUEL TYPE 1", f and (short(f[3], 12) .. "  " .. fmt(f[1]) .. " mB") or "?", f and f[1], f and f[2])
-        add("FUEL TYPE 2", f and (short(f[6], 12) .. "  " .. fmt(f[4]) .. " mB") or "?", f and f[4], f and f[5])
+        add("FUEL 1", f and (d.fuelTypes[1] .. " " .. fmt(f[1]) .. " mB") or "?", f and f[1], f and f[2])
+        add("FUEL 2", f and (d.fuelTypes[2] .. " " .. fmt(f[4]) .. " mB") or "?", f and f[4], f and f[5])
+        add("FUEL 3", f and (d.fuelTypes[3] .. " " .. fmt(f[7]) .. " mB") or "?", f and f[7], f and f[8])
+        add("OUTPUT FLUID", f and (d.fuelTypes[4] .. " " .. fmt(f[10]) .. " mB") or "?", f and f[10], f and f[11])
         add("FUEL USE", c and (fmt(c[1]) .. " mB/t") or "?", c and c[1])
         d.activity = (tonumber(p and p[1]) or 0) + (tonumber(k and k[1]) or 0) + (tonumber(progress and progress[1]) or 0)
       elseif t == "ntm_fusion_klystron" then
         local o, e, air = call(a, "getOutput"), call(a, "getEnergyInfo"), call(a, "getAir")
+        d.targetOutput = tonumber(o and o[2]) or 0
+        d.targetPercent = math.max(0, math.min(100, math.floor(d.targetOutput / 1000000 * 100 + 0.5)))
         add("OUTPUT", o and (fmt(o[1]) .. " / " .. fmt(o[2]) .. " KYU/t") or "?", o and o[1], o and o[2])
         add("ENERGY BUFFER", e and (fmt(e[1]) .. " / " .. fmt(e[2]) .. " HE") or "?", e and e[1], e and e[2])
         add("COMPRESSED AIR", air and (fmt(air[1]) .. " / " .. fmt(air[2]) .. " mB") or "?", air and air[1], air and air[2])
@@ -6596,26 +6606,41 @@ end
       elseif t == "ntm_fusion_boiler" then
         local p, f = call(a, "getPlasmaEnergy"), call(a, "getFluid")
         add("PLASMA INPUT", p and (fmt(p[1]) .. " TU") or "?", p and p[1])
-        add("WATER", f and (fmt(f[1]) .. " / " .. fmt(f[2]) .. " mB") or "?", f and f[1], f and f[2])
-        add("DENSE STEAM", f and (fmt(f[3]) .. " / " .. fmt(f[4]) .. " mB") or "?", f and f[3], f and f[4])
+        add("WATER", f and ("WATER " .. fmt(f[1]) .. " mB") or "?", f and f[1], f and f[2])
+        add("STEAM", f and ("SUPER DENSE STEAM " .. fmt(f[3]) .. " mB") or "?", f and f[3], f and f[4])
         d.activity = tonumber(p and p[1]) or 0
       elseif t == "ntm_fusion_mhdt" then
         local e, p, c = call(a, "getEnergyInfo"), call(a, "getPlasmaEnergy"), call(a, "getCoolant")
         add("PLASMA INPUT", p and (fmt(p[1]) .. " TU") or "?", p and p[1])
         add("ENERGY BUFFER", e and (fmt(e[1]) .. " HE") or "?", e and e[1])
-        add("COLD COOLANT", c and (fmt(c[1]) .. " / " .. fmt(c[2]) .. " mB") or "?", c and c[1], c and c[2])
-        add("HOT COOLANT", c and (fmt(c[3]) .. " / " .. fmt(c[4]) .. " mB") or "?", c and c[3], c and c[4])
+        add("COLD FLUID", c and ("PERFLUOROMETHYL " .. fmt(c[1]) .. " mB") or "?", c and c[1], c and c[2])
+        add("HOT FLUID", c and ("PERFLUOROMETHYL " .. fmt(c[3]) .. " mB") or "?", c and c[3], c and c[4])
         d.activity = tonumber(p and p[1]) or 0
-      else
+      elseif t == "ntm_fusion_breeder" then
         local n, progress = call(a, "getNeutronEnergy"), call(a, "getProgress")
         local f, slots = call(a, "getFluid"), call(a, "getCrafting")
+        d.fuelTypes = { fluidName(f and f[3]), fluidName(f and f[6]) }
         add("NEUTRON ENERGY", n and fmt(n[1]) or "?", n and n[1])
         add("BREEDING PROGRESS", progress and fmt(progress[1]) or "?", progress and progress[1])
-        add("INPUT FLUID", f and (short(f[3]) .. "  " .. fmt(f[1]) .. " mB") or "?", f and f[1], f and f[2])
-        add("OUTPUT FLUID", f and (short(f[6]) .. "  " .. fmt(f[4]) .. " mB") or "?", f and f[4], f and f[5])
+        add("INPUT FLUID", f and (d.fuelTypes[1] .. " " .. fmt(f[1]) .. " mB") or "?", f and f[1], f and f[2])
+        add("OUTPUT FLUID", f and (d.fuelTypes[2] .. " " .. fmt(f[4]) .. " mB") or "?", f and f[4], f and f[5])
         add("CRAFTING SLOT 1", slots and (short(slots[2] or "Empty") .. " x" .. tostring(slots[1] or 0)) or "?")
         add("CRAFTING SLOT 2", slots and (short(slots[4] or "Empty") .. " x" .. tostring(slots[3] or 0)) or "?")
         d.activity = tonumber(n and n[1]) or 0
+      else
+        local heat, rate, maximum = call(a, "getHeat"), call(a, "getHeatingRate"), call(a, "getMaxHeat")
+        local power, f, pellet = call(a, "getPower"), call(a, "getFluid"), call(a, "getPelletStats")
+        d.fuelTypes = { fluidName(f and f[3]), fluidName(f and f[6]), fluidName(pellet and pellet[4]), fluidName(pellet and pellet[5]) }
+        add("HEAT", heat and (fmt(heat[1]) .. " / " .. fmt(maximum and maximum[1]) .. " TU") or "?", heat and heat[1], maximum and maximum[1])
+        add("HEATING RATE", rate and (fmt(rate[1]) .. " TU/t") or "?", rate and rate[1])
+        add("LASER POWER", power and (fmt(power[1]) .. " TU") or "?", power and power[1])
+        add("COLD COOLANT", f and (d.fuelTypes[1] .. " " .. fmt(f[1]) .. " mB") or "?", f and f[1], f and f[2])
+        add("HOT COOLANT", f and (d.fuelTypes[2] .. " " .. fmt(f[4]) .. " mB") or "?", f and f[4], f and f[5])
+        add("STELLAR FLUX", f and ("STELLAR FLUX " .. fmt(f[7]) .. " mB") or "?", f and f[7], f and f[8])
+        add("FUEL 1", pellet and d.fuelTypes[3] or "?", pellet and pellet[1], pellet and pellet[2])
+        add("FUEL 2", pellet and d.fuelTypes[4] or "?", pellet and pellet[1], pellet and pellet[2])
+        add("PELLET HEAT REQ", pellet and (fmt(pellet[3]) .. " TU") or "?")
+        d.activity = tonumber(power and power[1]) or 0
       end
       if d.activity > 0 then d.status = "ACTIVE" end
       snapshots[unit.address] = d
@@ -6649,6 +6674,7 @@ end
     local function draw()
       cls()
       local dark, panel, raised, cyan, soft = 0x0A1218, 0x14212B, 0x1D303B, 0x36D6D6, 0xAFC2CB
+      sliderHit = nil
       fill(1, 1, W, 1, dark)
       text(2, 1, "REACTOS  /  FUSION CONTROL", math.max(1, W - 20), cyan, dark)
       text(math.max(1, W - 16), 1, "LIVE", math.min(14, W), GREEN, dark)
@@ -6684,7 +6710,7 @@ end
       local wide = W >= 74 and panelH >= 8
       local leftX, leftW, rightX, rightW = 2, W - 3, nil, 0
       if wide then
-        leftW = math.floor((W - 5) * 0.46)
+        leftW = math.floor((W - 5) * 0.40)
         rightX, rightW = leftX + leftW + 2, W - leftX - leftW - 3
       end
       fill(leftX, top, leftW, panelH, panel)
@@ -6715,12 +6741,29 @@ end
           text(leftX + leftW - 10, y, d.status, 9, statusColor, bg)
           local first
           if unit.type == "ntm_fusion_torus" then
-            first = d.fuelTypes and ("FUEL: " .. d.fuelTypes[1] .. " + " .. d.fuelTypes[2]) or "Fuel telemetry unavailable"
+            first = d.fuelTypes and ("FUEL: " .. d.fuelTypes[1] .. " / " .. d.fuelTypes[2] .. " / " .. d.fuelTypes[3]) or "Fuel telemetry unavailable"
+          elseif unit.type == "ntm_fusion_breeder" then
+            first = d.fuelTypes and ("FLUID: " .. d.fuelTypes[1] .. " > " .. d.fuelTypes[2]) or "Fluid telemetry unavailable"
+          elseif unit.type == "ntm_fusion_boiler" then
+            first = "FLUID: WATER + SUPER DENSE STEAM"
+          elseif unit.type == "ntm_fusion_mhdt" then
+            first = "FLUID: COLD + HOT PERFLUOROMETHYL"
+          elseif unit.type == "ntm_fusion_klystron" then
+            first = "AIR: COMPRESSED AIR  |  SET " .. tostring(d.targetPercent or 0) .. "% / " .. fmt(d.targetOutput or 0) .. " KYU/t"
+          elseif unit.type == "ntm_icf_reactor" then
+            first = d.fuelTypes and ("COOLANT: " .. d.fuelTypes[1] .. " + " .. d.fuelTypes[2]) or "Coolant telemetry unavailable"
           else
             first = d.metrics[1] and (d.metrics[1][1] .. "  " .. d.metrics[1][2]) or "Telemetry unavailable"
           end
           text(leftX + 2, y + 1, first, leftW - 4, soft, bg)
-          if not wide and not compact then
+          if not wide and not compact and unit.type == "ntm_fusion_klystron" and index == selected then
+            local sx, sy, sw = leftX + 2, y + 2, leftW - 4
+            local pct = d.targetPercent or 0
+            fill(sx, sy, sw, 1, 0x263742)
+            fill(sx, sy, math.floor(sw * pct / 100), 1, cyan)
+            fill(sx + math.floor((sw - 1) * pct / 100), sy, 1, 1, WHITE)
+            sliderHit = { sx, sx + sw - 1, sy, selected }
+          elseif not wide and not compact then
             local second = d.metrics[2] and (d.metrics[2][1] .. "  " .. d.metrics[2][2]) or ("ID " .. unit.address:sub(1, 8))
             text(leftX + 2, y + 2, second, leftW - 4, soft, bg)
           end
@@ -6736,33 +6779,68 @@ end
             text(rightX + 2, top + 2, unit.label, rightW - 4, cyan, panel)
             text(rightX + 2, top + 3, "ID  " .. unit.address:sub(1, 8), rightW - 4, soft, panel)
             text(rightX + 2, top + 4, "STATUS  " .. d.status, rightW - 4, statusColor, panel)
+            local isKlystron = unit.type == "ntm_fusion_klystron"
+            local detailBottom = bottom - (isKlystron and 3 or 0)
+            local valueW = math.min(26, math.max(12, rightW - 19))
+            local labelW = math.max(1, rightW - valueW - 4)
             for i, m in ipairs(d.metrics) do
               local y = top + 6 + i - 1
-              if y >= bottom then break end
-              text(rightX + 2, y, m[1], math.max(1, rightW - 16), soft, panel)
-              text(rightX + rightW - 13, y, m[2], 12, WHITE, panel)
+              if y > detailBottom then break end
+              text(rightX + 2, y, m[1], labelW, soft, panel)
+              text(rightX + 4 + labelW, y, m[2], valueW, WHITE, panel)
+            end
+            if isKlystron then
+              local pct = d.targetPercent or 0
+              local sx, sy, sw = rightX + 2, bottom - 1, rightW - 4
+              text(sx, bottom - 2, "OUTPUT SETPOINT  " .. pct .. "%  =  " .. fmt((pct / 100) * 1000000) .. " KYU/t", sw, cyan, panel)
+              fill(sx, sy, sw, 1, 0x263742)
+              fill(sx, sy, math.floor(sw * pct / 100), 1, cyan)
+              fill(sx + math.floor((sw - 1) * pct / 100), sy, 1, 1, WHITE)
+              sliderHit = { sx, sx + sw - 1, sy, selected }
+              if controlMessage then text(sx, bottom - 3, controlMessage, sw, controlError and RED or GREEN, panel) end
             end
           end
         end
       end
-      bar(H, "Up/Down or touch: select   R: rescan   Q/Esc: close", GRAY, BLACK)
+      bar(H, "Select unit | Klystron: slider or Left/Right +/-5% | Q: close", GRAY, BLACK)
     end
+    local nextRefresh = computer.uptime() + 2
     local function refreshAndDraw()
       refresh()
       draw()
     end
+    local function setOutputPercent(value)
+      local unit = units[selected]
+      if not unit or unit.type ~= "ntm_fusion_klystron" then return end
+      value = math.max(0, math.min(100, math.floor(tonumber(value) or 0)))
+      local target = math.floor(1000000 * value / 100 + 0.5)
+      local ok, reason = pcall(component.invoke, unit.address, "setOutput", target)
+      controlError = not ok
+      controlMessage = ok and ("SETPOINT SENT: " .. value .. "%") or ("SET FAILED: " .. tostring(reason))
+      refreshAndDraw()
+      nextRefresh = computer.uptime() + 2
+    end
     refreshAndDraw()
-    local nextRefresh = computer.uptime() + 2
     while true do
       local e, _, ch, code = pull(0.25)
       if e == "key_down" then
         if ch == 113 or ch == 81 or ch == 27 or code == 1 then cls(); return
         elseif ch == 114 or ch == 82 then refreshAndDraw(); nextRefresh = computer.uptime() + 2
         elseif code == 200 then selected = math.max(1, selected - 1); draw()
-        elseif code == 208 then selected = math.min(#units, selected + 1); draw() end
+        elseif code == 208 then selected = math.min(#units, selected + 1); draw()
+        elseif code == 203 and units[selected] and units[selected].type == "ntm_fusion_klystron" then
+          setOutputPercent((snapshots[units[selected].address].targetPercent or 0) - 5)
+        elseif code == 205 and units[selected] and units[selected].type == "ntm_fusion_klystron" then
+          setOutputPercent((snapshots[units[selected].address].targetPercent or 0) + 5)
+        end
       elseif e == "touch" then
-        for _, hit in ipairs(hits) do
-          if ch >= hit[1] and ch <= hit[3] and code >= hit[2] and code <= hit[4] then selected = hit[5]; draw(); break end
+        if sliderHit and ch >= sliderHit[1] and ch <= sliderHit[2] and code == sliderHit[3] then
+          local ratio = (sliderHit[2] == sliderHit[1]) and 0 or ((ch - sliderHit[1]) / (sliderHit[2] - sliderHit[1]))
+          setOutputPercent(math.floor(ratio * 100 + 0.5))
+        else
+          for _, hit in ipairs(hits) do
+            if ch >= hit[1] and ch <= hit[3] and code >= hit[2] and code <= hit[4] then selected = hit[5]; draw(); break end
+          end
         end
       end
       if computer.uptime() >= nextRefresh then
@@ -6770,7 +6848,8 @@ end
         nextRefresh = computer.uptime() + 2
       end
     end
-  end  local function buildIcons()
+  end
+  local function buildIcons()
     local icons = {
       { name = "ME Storage", box = 0x2060A0, glyph = "ME", app = "me" },
       { name = "Settings", box = GRAY, glyph = "SET", app = "settings" },
