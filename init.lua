@@ -6921,7 +6921,20 @@ end
           text(3, gaugeTop + 1, "INPUTS: " .. (d.fluidReadout or "fluid IDs unavailable"), W - 5, soft, panel)
         end
         local meters = {}
-        if d then
+        if d and unit and unit.type == "ntm_fusion_torus" then
+          local fuelAmount, fuelMaximum = 0, 0
+          for _, m in ipairs(d.metrics or {}) do
+            if m[1]:match("^FUEL %d+$") and m[3] and m[4] and m[4] > 0 and m[3] > 0 then
+              fuelAmount, fuelMaximum = fuelAmount + m[3], fuelMaximum + m[4]
+            end
+          end
+          if fuelMaximum > 0 then meters[#meters + 1] = { "FUEL TOTAL", fmt(fuelAmount) .. " / " .. fmt(fuelMaximum) .. " mB", fuelAmount, fuelMaximum } end
+          for _, wanted in ipairs({ "OUTPUT FLUID", "ENERGY BUFFER", "COLD COOLANT", "HOT COOLANT" }) do
+            for _, m in ipairs(d.metrics or {}) do
+              if m[1] == wanted and m[3] and m[4] and m[4] > 0 then meters[#meters + 1] = m; break end
+            end
+          end
+        elseif d then
           for _, m in ipairs(d.metrics or {}) do
             if m[3] and m[4] and m[4] > 0 then meters[#meters + 1] = m end
           end
@@ -6929,18 +6942,23 @@ end
         if #meters == 0 then
           if not d or #d.warnings == 0 then text(3, gaugeTop, "No bounded tank or energy gauge reported for this unit.", W - 5, soft, panel) end
         else
-          local meterCount = math.min(3, #meters)
-          local labelW, barW = math.min(19, math.max(10, math.floor(W * 0.27))), math.max(8, math.floor(W * 0.34))
-          for i = 1, meterCount do
-            local m, y = meters[i], gaugeTop + i + 1
-            local x = 3
+          local meterCols = W >= 110 and 2 or 1
+          local meterRows = math.min(3, math.ceil(#meters / meterCols))
+          local cardW = math.max(1, math.floor((W - 6 - (meterCols - 1) * 2) / meterCols))
+          local labelW = math.min(18, math.max(9, math.floor(cardW * 0.25)))
+          local barW = math.max(5, math.floor(cardW * 0.42))
+          for i = 1, meterRows * meterCols do
+            local m = meters[i]
+            if not m then break end
+            local row, col = math.floor((i - 1) / meterCols), (i - 1) % meterCols
+            local y, x = gaugeTop + row + 2, 3 + col * (cardW + 2)
             local ratio = math.max(0, math.min(1, m[3] / m[4]))
             text(x, y, m[1], labelW, soft, panel)
             local bx = x + labelW + 1
             fill(bx, y, barW, 1, 0x263742)
             fill(bx, y, math.floor(barW * ratio), 1, ratio >= 0.9 and 0xFF9B62 or cyan)
             local valueX = bx + barW + 1
-            text(valueX, y, fmt(m[3]) .. " / " .. fmt(m[4]), math.max(1, W - valueX - 1), WHITE, panel)
+            text(valueX, y, fmt(m[3]) .. " / " .. fmt(m[4]), math.max(1, x + cardW - valueX), WHITE, panel)
           end
         end
         bar(H, "HOT >=90% | FUEL/POWER <=10% | COLD PFM = 0 | G: system | Q: close", GRAY, BLACK)
