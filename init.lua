@@ -6628,14 +6628,20 @@ end
           cold = { amount = 0, maximum = 0, found = false },
           hot = { amount = 0, maximum = 0, found = false },
         }
-        local coolantNames, fuelNames, fuelMetrics = {}, {}, {}
+        local coolantNames, fuelNames, fuelMetrics, inputReadout = {}, {}, {}, {}
         for tank = 1, 3 do
           local base = (tank - 1) * 3 + 1
           local id = fluidId(f and f[base + 2])
+          if id == "" or fluidName(id) == "UNKNOWN FLUID" then id = fluidId(info and info[base + 4]) end
           local name, kind = fluidName(id), perfluoromethylKind(id)
-          local amount, maximum = tonumber(f and f[base]), tonumber(f and f[base + 1])
+          local amount = current(f and f[base], info and info[base + 2])
+          local maximum = current(f and f[base + 1], info and info[base + 3])
           d.fuelTypes[tank], d.fluidIds[tank] = name, id
           d.fuelGroups[tank] = kind and "COOLANT" or "FUEL"
+          local kindLabel = kind and "COOLANT" or "FUEL"
+          local pct = tonumber(maximum) and maximum > 0 and math.floor((tonumber(amount) or 0) / maximum * 100 + 0.5) or 0
+          local rawId = id ~= "" and short(id, 14) or "NO-ID"
+          inputReadout[#inputReadout + 1] = kindLabel .. tank .. "=" .. short(name, 14) .. "{" .. rawId .. "} " .. pct .. "%"
           if kind then
             local store = coolantSlots[kind]
             store.found = true
@@ -6647,10 +6653,15 @@ end
             fuelMetrics[#fuelMetrics + 1] = { tank, name, amount, maximum }
           end
         end
-        d.fuelTypes[4] = fluidName(f and f[12])
-        d.fluidIds[4] = fluidId(f and f[12])
+        local outputId = fluidId(f and f[12])
+        if outputId == "" or fluidName(outputId) == "UNKNOWN FLUID" then outputId = fluidId(info and info[14]) end
+        local outputAmount = current(f and f[10], info and info[12])
+        local outputMaximum = current(f and f[11], info and info[13])
+        d.fuelTypes[4] = fluidName(outputId)
+        d.fluidIds[4] = outputId
         d.fuelSummary = #fuelNames > 0 and table.concat(fuelNames, " / ") or "NONE DETECTED"
         d.coolantSummary = #coolantNames > 0 and table.concat(coolantNames, " / ") or "PERFLUOROMETHYL"
+        d.fluidReadout = table.concat(inputReadout, " | ")
         local recipeParts = {}
         for tank = 1, 3 do
           if d.fuelGroups[tank] == "FUEL" and d.fuelTypes[tank] and d.fuelTypes[tank] ~= "EMPTY" and d.fuelTypes[tank] ~= "UNKNOWN FLUID" then
@@ -6669,26 +6680,30 @@ end
         for _, tank in ipairs(fuelMetrics) do
           add("FUEL " .. tank[1], tank[2] .. " " .. fmt(tank[3]) .. " mB", tank[3], tank[4])
         end
-        add("OUTPUT FLUID", f and (d.fuelTypes[4] .. " " .. fmt(f[10]) .. " mB") or "?", f and f[10], f and f[11])
+        add("OUTPUT FLUID", (outputAmount ~= nil or outputMaximum ~= nil) and (d.fuelTypes[4] .. " " .. fmt(outputAmount) .. " mB") or "?", outputAmount, outputMaximum)
         add("FUEL USE", c and (fmt(c[1]) .. " mB/t") or "?", c and c[1])
         if tonumber(hotMax) and hotMax > 0 and tonumber(hot) then
           d.alarms.hot = hot / hotMax >= 0.90
           if d.alarms.hot then d.warnings[#d.warnings + 1] = { "HOT PFM OVERFLOW RISK (90%+)", RED } end
         end
-        local lowFuel, fuelKnown = false, false
+        local lowFuel, fuelKnown, lowFuelNames = false, false, {}
         for tank = 1, 3 do
           local base = (tank - 1) * 3 + 1
-          local amount, maximum = tonumber(f and f[base]), tonumber(f and f[base + 1])
+          local amount = current(f and f[base], info and info[base + 2])
+          local maximum = current(f and f[base + 1], info and info[base + 3])
           local fluid = d.fuelTypes[tank]
           -- Empty, unused inputs are not low fuel; only check identified fuel fluids.
           if d.fuelGroups[tank] == "FUEL" and fluid and fluid ~= "EMPTY" and fluid ~= "UNKNOWN FLUID" and maximum and maximum > 0 and amount then
             fuelKnown = true
-            if amount / maximum <= 0.10 then lowFuel = true end
+            if amount / maximum <= 0.10 then
+              lowFuel = true
+              lowFuelNames[#lowFuelNames + 1] = fluid
+            end
           end
         end
         if fuelKnown then
           d.alarms.lowFuel = lowFuel
-          if lowFuel then d.warnings[#d.warnings + 1] = { "LOW FUSION FUEL (10% OR LESS)", 0xFFD166 } end
+          if lowFuel then d.warnings[#d.warnings + 1] = { "LOW FUSION FUEL: " .. table.concat(lowFuelNames, ", "), 0xFFD166 } end
         end
         if tonumber(capacity) and capacity > 0 and tonumber(stored) then
           d.alarms.lowPower = stored / capacity <= 0.10
@@ -6865,7 +6880,7 @@ end
       if page == 2 then
         local unitCount = #units
         local cols = W >= 100 and 4 or (W >= 66 and 3 or 2)
-        local gridTop, gaugeTop = 9, H - 5
+        local gridTop, gaugeTop = 9, H - 6
         local cardH, gap = 4, 1
         local rows = math.max(1, math.floor((gaugeTop - gridTop) / (cardH + gap)))
         local pageSize = cols * rows
@@ -6901,6 +6916,9 @@ end
           for i, warning in ipairs(d.warnings) do labels[i] = warning[1] end
           text(3, gaugeTop, "WARN: " .. table.concat(labels, " | "), W - 5, RED, panel)
         end
+        if unit and unit.type == "ntm_fusion_torus" then
+          text(3, gaugeTop + 1, "INPUTS: " .. (d.fluidReadout or "fluid IDs unavailable"), W - 5, soft, panel)
+        end
         local meters = {}
         if d then
           for _, m in ipairs(d.metrics or {}) do
@@ -6913,7 +6931,7 @@ end
           local meterCount = math.min(3, #meters)
           local labelW, barW = math.min(19, math.max(10, math.floor(W * 0.27))), math.max(8, math.floor(W * 0.34))
           for i = 1, meterCount do
-            local m, y = meters[i], gaugeTop + i
+            local m, y = meters[i], gaugeTop + i + 1
             local x = 3
             local ratio = math.max(0, math.min(1, m[3] / m[4]))
             text(x, y, m[1], labelW, soft, panel)
