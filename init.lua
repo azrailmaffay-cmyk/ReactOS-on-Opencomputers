@@ -6580,6 +6580,16 @@ end
       name = name:gsub("^%s+", ""):gsub("%s+$", "")
       name = name:gsub("^[Hh][Bb][Mm][Ff][Ll][Uu][Ii][Dd][%.:_/]", "")
       name = name:gsub("^[%w_%-]+[%.:]", "")
+      local key = name:upper():gsub("[^A-Z0-9]", "")
+      local wikiNames = {
+        AMAT = "ANTIMATTER", BALEFIRE = "BF ROCKET FUEL", BFROCKETFUEL = "BF ROCKET FUEL",
+        STELLARFLUX = "STELLAR FLUX", DEUTERIUM = "DEUTERIUM", TRITIUM = "TRITIUM",
+        OXYGEN = "LIQUID OXYGEN", CHLORINE = "CHLORINE GAS", HELIUM3 = "HELIUM-3",
+        HELIUM4 = "HELIUM-4", DHC = "DEUTERATED HYDROCARBON", PLASMABF = "BALEFIRE PLASMA",
+        PERFLUOROMETHYL = "PERFLUOROMETHYL", PERFLUOROMETHYLCOLD = "COLD PERFLUOROMETHYL",
+        PERFLUOROMETHYLHOT = "HOT PERFLUOROMETHYL",
+      }
+      if wikiNames[key] then return wikiNames[key] end
       name = name:gsub("_", " "):gsub("%.", " ")
       if name:lower() == "hbmfluid" then name = "UNKNOWN FLUID" end
       if name == "" then return fallback or "EMPTY" end
@@ -6641,6 +6651,13 @@ end
         d.fluidIds[4] = fluidId(f and f[12])
         d.fuelSummary = #fuelNames > 0 and table.concat(fuelNames, " / ") or "NONE DETECTED"
         d.coolantSummary = #coolantNames > 0 and table.concat(coolantNames, " / ") or "PERFLUOROMETHYL"
+        local recipeParts = {}
+        for tank = 1, 3 do
+          if d.fuelGroups[tank] == "FUEL" and d.fuelTypes[tank] and d.fuelTypes[tank] ~= "EMPTY" and d.fuelTypes[tank] ~= "UNKNOWN FLUID" then
+            recipeParts[#recipeParts + 1] = d.fuelTypes[tank]
+          end
+        end
+        d.recipeName = #recipeParts > 0 and table.concat(recipeParts, " + ") or "NO FUEL RECIPE DETECTED"
         if coolantSlots.cold.found then cold, coldMax = coolantSlots.cold.amount, coolantSlots.cold.maximum end
         if coolantSlots.hot.found then hot, hotMax = coolantSlots.hot.amount, coolantSlots.hot.maximum end
         add("PERF PROGRESS", progress and (fmt(progress[1]) .. " + BONUS " .. fmt(progress[2])) or "?", progress and progress[1])
@@ -6946,7 +6963,7 @@ end
           text(leftX + leftW - 10, y, d.status, 9, statusColor, bg)
           local first
           if unit.type == "ntm_fusion_torus" then
-            first = d.fuelTypes and ("FUEL: " .. d.fuelSummary .. " | COOLANT: " .. d.coolantSummary) or "Fluid telemetry unavailable"
+            first = d.fuelTypes and ("MIX: " .. d.recipeName) or "Fluid telemetry unavailable"
           elseif unit.type == "ntm_fusion_breeder" then
             first = d.fuelTypes and ("FLUID: " .. d.fuelTypes[1] .. " > " .. d.fuelTypes[2]) or "Fluid telemetry unavailable"
           elseif unit.type == "ntm_fusion_boiler" then
@@ -6982,7 +6999,8 @@ end
           if unit and d then
             local statusColor = (d.status == "ACTIVE" and GREEN) or ((d.status == "NO DATA" or d.status == "WARNING") and RED or 0xFFD166)
             text(rightX + 2, top + 2, unit.label, rightW - 4, cyan, panel)
-            text(rightX + 2, top + 3, "ID  " .. unit.address:sub(1, 8), rightW - 4, soft, panel)
+            local unitInfo = unit.type == "ntm_fusion_torus" and ("FUEL MIX  " .. d.recipeName) or ("ID  " .. unit.address:sub(1, 8))
+            text(rightX + 2, top + 3, unitInfo, rightW - 4, soft, panel)
             local statusText = d.status == "WARNING" and ("STATUS  WARNING / " .. #d.warnings .. " ALERTS") or ("STATUS  " .. d.status)
             text(rightX + 2, top + 4, statusText, rightW - 4, statusColor, panel)
             local isKlystron = unit.type == "ntm_fusion_klystron"
