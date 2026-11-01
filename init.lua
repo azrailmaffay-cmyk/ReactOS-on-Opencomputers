@@ -6569,16 +6569,26 @@ end
     local function short(v, width)
       return unicode.sub(tostring(v or "?"), 1, width or 12)
     end
+    local function fluidId(v)
+      local id
+      if type(v) == "table" then id = tostring(v.registryName or v.fluidName or v.id or v.name or "")
+      else id = tostring(v or "") end
+      return id:gsub("^%s+", ""):gsub("%s+$", "")
+    end
     local function fluidName(v, fallback)
-      local name
-      if type(v) == "table" then name = tostring(v.name or v.fluidName or v.id or v.registryName or "")
-      else name = tostring(v or "") end
+      local name = fluidId(v)
       name = name:gsub("^%s+", ""):gsub("%s+$", "")
-      name = name:gsub("^[Hh][Bb][Mm][Ff][Ll][Uu][Ii][Dd][%.:]", "")
+      name = name:gsub("^[Hh][Bb][Mm][Ff][Ll][Uu][Ii][Dd][%.:_/]", "")
+      name = name:gsub("^[%w_%-]+[%.:]", "")
       name = name:gsub("_", " "):gsub("%.", " ")
       if name:lower() == "hbmfluid" then name = "UNKNOWN FLUID" end
       if name == "" then return fallback or "EMPTY" end
       return short(string.upper(name), 20)
+    end
+    local function perfluoromethylKind(id)
+      local key = tostring(id or ""):lower()
+      if not key:find("perfluoro", 1, true) then return nil end
+      return (key:find("cold", 1, true) or key:find("chilled", 1, true)) and "cold" or "hot"
     end
     local function readUnit(unit)
       local a, t = unit.address, unit.type
@@ -6602,18 +6612,47 @@ end
         local capacity = current(e and e[2], info and info[2])
         local cold, coldMax = current(coolant and coolant[1], info and info[15]), current(coolant and coolant[2], info and info[16])
         local hot, hotMax = current(coolant and coolant[3], info and info[17]), current(coolant and coolant[4], info and info[18])
-        -- getFluid() tanks 1-3 are fusion fuel; perfluoromethyl is only read from getCoolant().
-        d.fuelTypes = { fluidName(f and f[3]), fluidName(f and f[6]), fluidName(f and f[9]), fluidName(f and f[12]) }
+        -- Classify fluid tanks by their returned registry ID: perfluoromethyl is coolant even if it appears in a fuel slot.
+        d.fuelTypes, d.fluidIds, d.fuelGroups = {}, {}, {}
+        local coolantSlots = {
+          cold = { amount = 0, maximum = 0, found = false },
+          hot = { amount = 0, maximum = 0, found = false },
+        }
+        local coolantNames, fuelNames, fuelMetrics = {}, {}, {}
+        for tank = 1, 3 do
+          local base = (tank - 1) * 3 + 1
+          local id = fluidId(f and f[base + 2])
+          local name, kind = fluidName(id), perfluoromethylKind(id)
+          local amount, maximum = tonumber(f and f[base]), tonumber(f and f[base + 1])
+          d.fuelTypes[tank], d.fluidIds[tank] = name, id
+          d.fuelGroups[tank] = kind and "COOLANT" or "FUEL"
+          if kind then
+            local store = coolantSlots[kind]
+            store.found = true
+            store.amount = store.amount + (amount or 0)
+            store.maximum = store.maximum + (maximum or 0)
+            coolantNames[#coolantNames + 1] = name
+          else
+            fuelNames[#fuelNames + 1] = name
+            fuelMetrics[#fuelMetrics + 1] = { tank, name, amount, maximum }
+          end
+        end
+        d.fuelTypes[4] = fluidName(f and f[12])
+        d.fluidIds[4] = fluidId(f and f[12])
+        d.fuelSummary = #fuelNames > 0 and table.concat(fuelNames, " / ") or "NONE DETECTED"
+        d.coolantSummary = #coolantNames > 0 and table.concat(coolantNames, " / ") or "PERFLUOROMETHYL"
+        if coolantSlots.cold.found then cold, coldMax = coolantSlots.cold.amount, coolantSlots.cold.maximum end
+        if coolantSlots.hot.found then hot, hotMax = coolantSlots.hot.amount, coolantSlots.hot.maximum end
         add("PERF PROGRESS", progress and (fmt(progress[1]) .. " + BONUS " .. fmt(progress[2])) or "?", progress and progress[1])
         add("PLASMA OUTPUT", p and (fmt(p[1]) .. " TU/t") or "?", p and p[1])
         add("KLYSTRON INPUT", k and (fmt(k[1]) .. " KYU/t") or "?", k and k[1])
         add("ENERGY BUFFER", (stored ~= nil or capacity ~= nil) and (fmt(stored) .. " / " .. fmt(capacity) .. " HE") or "?", stored, capacity)
-        add("FUEL 1", f and (d.fuelTypes[1] .. " " .. fmt(f[1]) .. " mB") or "?", f and f[1], f and f[2])
-        add("FUEL 2", f and (d.fuelTypes[2] .. " " .. fmt(f[4]) .. " mB") or "?", f and f[4], f and f[5])
-        add("FUEL 3", f and (d.fuelTypes[3] .. " " .. fmt(f[7]) .. " mB") or "?", f and f[7], f and f[8])
-        add("OUTPUT FLUID", f and (d.fuelTypes[4] .. " " .. fmt(f[10]) .. " mB") or "?", f and f[10], f and f[11])
         add("COLD COOLANT", (cold ~= nil or coldMax ~= nil) and ("COLD PERFLUOROMETHYL " .. fmt(cold) .. " mB") or "?", cold, coldMax)
         add("HOT COOLANT", (hot ~= nil or hotMax ~= nil) and ("PERFLUOROMETHYL " .. fmt(hot) .. " mB") or "?", hot, hotMax)
+        for _, tank in ipairs(fuelMetrics) do
+          add("FUEL " .. tank[1], tank[2] .. " " .. fmt(tank[3]) .. " mB", tank[3], tank[4])
+        end
+        add("OUTPUT FLUID", f and (d.fuelTypes[4] .. " " .. fmt(f[10]) .. " mB") or "?", f and f[10], f and f[11])
         add("FUEL USE", c and (fmt(c[1]) .. " mB/t") or "?", c and c[1])
         if tonumber(hotMax) and hotMax > 0 and tonumber(hot) then
           d.alarms.hot = hot / hotMax >= 0.90
@@ -6624,7 +6663,7 @@ end
           local base = (tank - 1) * 3 + 1
           local amount, maximum = tonumber(f and f[base]), tonumber(f and f[base + 1])
           local fluid = d.fuelTypes[tank]
-          if maximum and maximum > 0 and amount then
+          if d.fuelGroups[tank] == "FUEL" and maximum and maximum > 0 and amount then
             fuelKnown = true
             if not fluid or fluid == "EMPTY" or amount / maximum <= 0.10 then lowFuel = true end
           end
@@ -6907,7 +6946,7 @@ end
           text(leftX + leftW - 10, y, d.status, 9, statusColor, bg)
           local first
           if unit.type == "ntm_fusion_torus" then
-            first = d.fuelTypes and ("FUEL: " .. d.fuelTypes[1] .. " / " .. d.fuelTypes[2] .. " / " .. d.fuelTypes[3] .. " | PFM COOLANT") or "Fuel telemetry unavailable"
+            first = d.fuelTypes and ("FUEL: " .. d.fuelSummary .. " | COOLANT: " .. d.coolantSummary) or "Fluid telemetry unavailable"
           elseif unit.type == "ntm_fusion_breeder" then
             first = d.fuelTypes and ("FLUID: " .. d.fuelTypes[1] .. " > " .. d.fuelTypes[2]) or "Fluid telemetry unavailable"
           elseif unit.type == "ntm_fusion_boiler" then
