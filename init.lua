@@ -6582,7 +6582,7 @@ end
     end
     local function readUnit(unit)
       local a, t = unit.address, unit.type
-      local d = { metrics = {}, warnings = {}, status = "NO DATA", activity = 0 }
+      local d = { metrics = {}, warnings = {}, alarms = {}, status = "NO DATA", activity = 0 }
       local function add(label, value, amount, maximum)
         d.metrics[#d.metrics + 1] = { label, tostring(value), tonumber(amount), tonumber(maximum) }
         if value ~= "?" then d.status = "STANDBY" end
@@ -6602,6 +6602,7 @@ end
         local capacity = current(e and e[2], info and info[2])
         local cold, coldMax = current(coolant and coolant[1], info and info[15]), current(coolant and coolant[2], info and info[16])
         local hot, hotMax = current(coolant and coolant[3], info and info[17]), current(coolant and coolant[4], info and info[18])
+        -- getFluid() tanks 1-3 are fusion fuel; perfluoromethyl is only read from getCoolant().
         d.fuelTypes = { fluidName(f and f[3]), fluidName(f and f[6]), fluidName(f and f[9]), fluidName(f and f[12]) }
         add("PERF PROGRESS", progress and (fmt(progress[1]) .. " + BONUS " .. fmt(progress[2])) or "?", progress and progress[1])
         add("PLASMA OUTPUT", p and (fmt(p[1]) .. " TU/t") or "?", p and p[1])
@@ -6614,21 +6615,32 @@ end
         add("COLD COOLANT", (cold ~= nil or coldMax ~= nil) and ("COLD PERFLUOROMETHYL " .. fmt(cold) .. " mB") or "?", cold, coldMax)
         add("HOT COOLANT", (hot ~= nil or hotMax ~= nil) and ("PERFLUOROMETHYL " .. fmt(hot) .. " mB") or "?", hot, hotMax)
         add("FUEL USE", c and (fmt(c[1]) .. " mB/t") or "?", c and c[1])
-        if tonumber(hotMax) and tonumber(hotMax) > 0 and tonumber(hot) and hot / hotMax >= 0.90 then
-          d.warnings[#d.warnings + 1] = { "HOT PFM OVERFLOW RISK (90%+)", RED }
+        if tonumber(hotMax) and hotMax > 0 and tonumber(hot) then
+          d.alarms.hot = hot / hotMax >= 0.90
+          if d.alarms.hot then d.warnings[#d.warnings + 1] = { "HOT PFM OVERFLOW RISK (90%+)", RED } end
         end
-        local lowFuel = false
+        local lowFuel, fuelKnown = false, false
         for tank = 1, 3 do
           local base = (tank - 1) * 3 + 1
           local amount, maximum = tonumber(f and f[base]), tonumber(f and f[base + 1])
           local fluid = d.fuelTypes[tank]
-          if fluid and fluid ~= "EMPTY" and fluid ~= "UNKNOWN FLUID" and maximum and maximum > 0 and amount and amount / maximum <= 0.10 then lowFuel = true end
+          if maximum and maximum > 0 and amount then
+            fuelKnown = true
+            if not fluid or fluid == "EMPTY" or amount / maximum <= 0.10 then lowFuel = true end
+          end
         end
-        if lowFuel then d.warnings[#d.warnings + 1] = { "LOW FUEL (10% OR LESS)", 0xFFD166 } end
-        if tonumber(capacity) and capacity > 0 and tonumber(stored) and stored / capacity <= 0.10 then
-          d.warnings[#d.warnings + 1] = { "LOW POWER (10% OR LESS)", 0xFFD166 }
+        if fuelKnown then
+          d.alarms.lowFuel = lowFuel
+          if lowFuel then d.warnings[#d.warnings + 1] = { "LOW FUSION FUEL (10% OR LESS)", 0xFFD166 } end
         end
-        if tonumber(cold) and cold <= 0 then d.warnings[#d.warnings + 1] = { "NO COLD PERFLUOROMETHYL", RED } end
+        if tonumber(capacity) and capacity > 0 and tonumber(stored) then
+          d.alarms.lowPower = stored / capacity <= 0.10
+          if d.alarms.lowPower then d.warnings[#d.warnings + 1] = { "LOW POWER (10% OR LESS)", 0xFFD166 } end
+        end
+        if tonumber(cold) then
+          d.alarms.noCold = cold <= 0
+          if d.alarms.noCold then d.warnings[#d.warnings + 1] = { "NO COLD PERFLUOROMETHYL", RED } end
+        end
         d.activity = (tonumber(p and p[1]) or 0) + (tonumber(k and k[1]) or 0) + (tonumber(progress and progress[1]) or 0)
       elseif t == "ntm_fusion_klystron" then
         local o, e, air = call(a, "getOutput"), call(a, "getEnergyInfo"), call(a, "getAir")
@@ -6718,7 +6730,8 @@ end
       text(math.max(1, W - 16), 1, "LIVE", math.min(14, W), GREEN, dark)
       fill(1, 2, W, 2, 0x101A22)
       text(2, 2, "NTM FUSION ARRAY", W - 3, WHITE, 0x101A22)
-      text(2, 3, "Read-only telemetry   |   Refresh: 2 sec", math.max(1, W - 24), soft, 0x101A22)
+      local subtitle = page == 2 and "MULTI-FUSION ALARMS  |  Any connected torus can trigger" or "Read-only telemetry   |   Refresh: 2 sec"
+      text(2, 3, subtitle, math.max(1, W - 24), soft, 0x101A22)
       tabHits = {}
       local tabs = { { "SYSTEM", 1 }, { "GAUGES", 2 } }
       local tx = math.max(2, W - 21)
@@ -6738,19 +6751,57 @@ end
         elseif unit.type == "ntm_fusion_breeder" then breeders = breeders + 1
         else support = support + 1 end
       end
+      local alarmDefs = {
+        { "HOT PFM", "hot" }, { "LOW FUEL", "lowFuel" },
+        { "LOW POWER", "lowPower" }, { "COLD PFM", "noCold" },
+      }
+      local alarmValues, alarmKnown, hasTorus = {}, {}, false
+      for _, unit in ipairs(units) do
+        if unit.type == "ntm_fusion_torus" then
+          hasTorus = true
+          local d = snapshots[unit.address]
+          for _, def in ipairs(alarmDefs) do
+            if d and d.alarms and d.alarms[def[2]] ~= nil then
+              alarmKnown[def[2]] = true
+              if d.alarms[def[2]] == true then alarmValues[def[2]] = true end
+            end
+          end
+        end
+      end
       local compact = H < 17
       if not compact then
-        local tiles = {
-          { "TOTAL UNITS", #units, cyan }, { "VESSELS", vessels, 0xFF9B62 },
-          { "KLYSTRONS", klystrons, 0xFFD166 }, { "SUPPORT + BREEDERS", support + breeders, 0x7ED6A8 },
-        }
+        local tiles
+        if page == 2 then
+          tiles = {}
+          for _, def in ipairs(alarmDefs) do
+            local alarm = alarmValues[def[2]] == true
+            local state = not hasTorus and "NO TORUS" or (not alarmKnown[def[2]] and "NO DATA" or (alarm and "ALARM" or "NORMAL"))
+            local alarmColor = (not hasTorus or not alarmKnown[def[2]]) and GRAY or (alarm and RED or GREEN)
+            tiles[#tiles + 1] = { def[1], state, alarmColor }
+          end
+        else
+          tiles = {
+            { "TOTAL UNITS", #units, cyan }, { "VESSELS", vessels, 0xFF9B62 },
+            { "KLYSTRONS", klystrons, 0xFFD166 }, { "SUPPORT + BREEDERS", support + breeders, 0x7ED6A8 },
+          }
+        end
         local gap, tileY, tileH = 1, 5, 3
         local tileW = math.max(1, math.floor((W - 4 - gap * (#tiles - 1)) / #tiles))
         for i, tile in ipairs(tiles) do
           local x = 2 + (i - 1) * (tileW + gap)
-          fill(x, tileY, tileW, tileH, panel)
-          text(x + 1, tileY, tile[1], tileW - 2, soft, panel)
-          text(x + 1, tileY + 1, tostring(tile[2]), tileW - 2, tile[3], panel)
+          if page == 2 then
+            local inside = tile[3] == RED and 0x3A1C20 or (tile[3] == GREEN and 0x12352B or 0x26313A)
+            fill(x, tileY, tileW, tileH, tile[3])
+            fill(x + 1, tileY + 1, tileW - 2, 1, inside)
+            local label = tile[1] .. ": " .. tostring(tile[2])
+            label = unicode.sub(label, 1, math.max(1, tileW - 2))
+            local labelX = x + math.max(1, math.floor((tileW - unicode.len(label)) / 2))
+            text(labelX, tileY + 1, label, unicode.len(label), WHITE, inside)
+          else
+            fill(x, tileY, tileW, tileH, panel)
+            text(x + 1, tileY, tile[1], tileW - 2, soft, panel)
+            text(x + 1, tileY + 1, tostring(tile[2]), tileW - 2, tile[3], panel)
+          end
         end
       end
 
