@@ -6680,9 +6680,10 @@ end
           local base = (tank - 1) * 3 + 1
           local amount, maximum = tonumber(f and f[base]), tonumber(f and f[base + 1])
           local fluid = d.fuelTypes[tank]
-          if d.fuelGroups[tank] == "FUEL" and maximum and maximum > 0 and amount then
+          -- Empty, unused inputs are not low fuel; only check identified fuel fluids.
+          if d.fuelGroups[tank] == "FUEL" and fluid and fluid ~= "EMPTY" and fluid ~= "UNKNOWN FLUID" and maximum and maximum > 0 and amount then
             fuelKnown = true
-            if not fluid or fluid == "EMPTY" or amount / maximum <= 0.10 then lowFuel = true end
+            if amount / maximum <= 0.10 then lowFuel = true end
           end
         end
         if fuelKnown then
