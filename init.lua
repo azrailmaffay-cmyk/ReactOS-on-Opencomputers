@@ -6623,7 +6623,7 @@ end
         local cold, coldMax = current(coolant and coolant[1], info and info[15]), current(coolant and coolant[2], info and info[16])
         local hot, hotMax = current(coolant and coolant[3], info and info[17]), current(coolant and coolant[4], info and info[18])
         -- Classify fluid tanks by their returned registry ID: perfluoromethyl is coolant even if it appears in a fuel slot.
-        d.fuelTypes, d.fluidIds, d.fuelGroups = {}, {}, {}
+        d.fuelTypes, d.fluidIds, d.fuelGroups, d.inputLevels = {}, {}, {}, {}
         local coolantSlots = {
           cold = { amount = 0, maximum = 0, found = false },
           hot = { amount = 0, maximum = 0, found = false },
@@ -6638,6 +6638,7 @@ end
           local maximum = current(f and f[base + 1], info and info[base + 3])
           d.fuelTypes[tank], d.fluidIds[tank] = name, id
           d.fuelGroups[tank] = kind and "COOLANT" or "FUEL"
+          d.inputLevels[tank] = tonumber(amount) or 0
           local kindLabel = kind and "COOLANT" or "FUEL"
           local pct = tonumber(maximum) and maximum > 0 and math.floor((tonumber(amount) or 0) / maximum * 100 + 0.5) or 0
           local rawId = id ~= "" and short(id, 14) or "NO-ID"
@@ -6649,7 +6650,7 @@ end
             store.maximum = store.maximum + (maximum or 0)
             coolantNames[#coolantNames + 1] = name
           else
-            fuelNames[#fuelNames + 1] = name
+            if amount and amount > 0 and name ~= "EMPTY" and name ~= "UNKNOWN FLUID" then fuelNames[#fuelNames + 1] = name end
             fuelMetrics[#fuelMetrics + 1] = { tank, name, amount, maximum }
           end
         end
@@ -6664,7 +6665,7 @@ end
         d.fluidReadout = table.concat(inputReadout, " | ")
         local recipeParts = {}
         for tank = 1, 3 do
-          if d.fuelGroups[tank] == "FUEL" and d.fuelTypes[tank] and d.fuelTypes[tank] ~= "EMPTY" and d.fuelTypes[tank] ~= "UNKNOWN FLUID" then
+          if d.fuelGroups[tank] == "FUEL" and d.inputLevels[tank] > 0 and d.fuelTypes[tank] and d.fuelTypes[tank] ~= "EMPTY" and d.fuelTypes[tank] ~= "UNKNOWN FLUID" then
             recipeParts[#recipeParts + 1] = d.fuelTypes[tank]
           end
         end
@@ -6692,8 +6693,8 @@ end
           local amount = current(f and f[base], info and info[base + 2])
           local maximum = current(f and f[base + 1], info and info[base + 3])
           local fluid = d.fuelTypes[tank]
-          -- Empty, unused inputs are not low fuel; only check identified fuel fluids.
-          if d.fuelGroups[tank] == "FUEL" and fluid and fluid ~= "EMPTY" and fluid ~= "UNKNOWN FLUID" and maximum and maximum > 0 and amount then
+          -- A zero-amount tank can retain its previous fluid ID. Only occupied fuel tanks participate in the low-fuel alarm.
+          if d.fuelGroups[tank] == "FUEL" and fluid and fluid ~= "EMPTY" and fluid ~= "UNKNOWN FLUID" and maximum and maximum > 0 and amount and amount > 0 then
             fuelKnown = true
             if amount / maximum <= 0.10 then
               lowFuel = true
