@@ -7118,6 +7118,173 @@ end
       end
     end
   end
+  local function icfApp()
+    local reactors, data, hits, tabHits = {}, {}, {}, {}
+    local selected, page = 1, 1
+    local function call(address, method)
+      local result = {}
+      local function capture(...) for i = 1, select("#", ...) do result[i] = select(i, ...) end end
+      local ok = pcall(function() capture(component.invoke(address, method)) end)
+      return ok and result or nil
+    end
+    local function fmt(value)
+      local n = tonumber(value)
+      return n and commas(math.floor(n + 0.5)) or "--"
+    end
+    local function name(value, fallback)
+      local s = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+      s = s:gsub("^[Hh][Bb][Mm][Ff][Ll][Uu][Ii][Dd][%.:_/]", ""):gsub("^[%w_%-]+[%.:]", "")
+      local key = s:upper():gsub("[^A-Z0-9]", "")
+      local known = { PERFLUOROMETHYL = "PERFLUOROMETHYL", PERFLUOROMETHYLCOLD = "COLD PERFLUOROMETHYL", PERFLUOROMETHYLHOT = "HOT PERFLUOROMETHYL", STELLARFLUX = "STELLAR FLUX" }
+      if known[key] then return known[key] end
+      if s == "" or key == "HBMFLUID" then return fallback or "UNKNOWN" end
+      return unicode.sub(s:gsub("_", " "):upper(), 1, 20)
+    end
+    local function read(reactor)
+      local heat, rate, maximum = call(reactor.address, "getHeat"), call(reactor.address, "getHeatingRate"), call(reactor.address, "getMaxHeat")
+      local power, fluid, pellet = call(reactor.address, "getPower"), call(reactor.address, "getFluid"), call(reactor.address, "getPelletStats")
+      local d = { metrics = {}, alarms = {}, warnings = {}, heat = tonumber(heat and heat[1]), maxHeat = tonumber(maximum and maximum[1]), rate = tonumber(rate and rate[1]), power = tonumber(power and power[1]), fluid = fluid, pellet = pellet }
+      d.coldName, d.hotName = name(fluid and fluid[3], "COLD COOLANT"), name(fluid and fluid[6], "HOT COOLANT")
+      d.fuel1, d.fuel2 = name(pellet and pellet[4], "NO PELLET DATA"), name(pellet and pellet[5], "NO PELLET DATA")
+      local function metric(label, value, amount, cap, unit)
+        d.metrics[#d.metrics + 1] = { label, value, tonumber(amount), tonumber(cap), unit }
+      end
+      metric("REACTOR HEAT", fmt(d.heat) .. " / " .. fmt(d.maxHeat) .. " TU", d.heat, d.maxHeat, "TU")
+      metric("HEATING RATE", fmt(d.rate) .. " TU/t", d.rate, nil, "TU/t")
+      metric("LASER POWER", fmt(d.power) .. " TU", d.power, nil, "TU")
+      metric("COLD COOLANT", d.coldName .. "  " .. fmt(fluid and fluid[1]) .. " mB", fluid and fluid[1], fluid and fluid[2], "mB")
+      metric("HOT COOLANT", d.hotName .. "  " .. fmt(fluid and fluid[4]) .. " mB", fluid and fluid[4], fluid and fluid[5], "mB")
+      metric("STELLAR FLUX", "STELLAR FLUX  " .. fmt(fluid and fluid[7]) .. " mB", fluid and fluid[7], fluid and fluid[8], "mB")
+      metric("PELLET DEPLETION", fmt(pellet and pellet[1]) .. " / " .. fmt(pellet and pellet[2]), pellet and pellet[1], pellet and pellet[2], "")
+      if d.heat and d.maxHeat and d.maxHeat > 0 then
+        d.alarms.hot = d.heat / d.maxHeat >= 0.90
+        if d.alarms.hot then d.warnings[#d.warnings + 1] = "HIGH HEAT (90%+)" end
+      end
+      if tonumber(fluid and fluid[5]) and fluid[5] > 0 and tonumber(fluid[4]) then
+        d.alarms.hotCoolant = fluid[4] / fluid[5] >= 0.90
+        if d.alarms.hotCoolant then d.warnings[#d.warnings + 1] = "HOT COOLANT NEAR FULL" end
+      end
+      if tonumber(fluid and fluid[2]) and fluid[2] > 0 and tonumber(fluid[1]) then
+        d.alarms.coldCoolant = fluid[1] <= 0
+        if d.alarms.coldCoolant then d.warnings[#d.warnings + 1] = "NO COLD COOLANT" end
+      end
+      if tonumber(fluid and fluid[8]) and fluid[8] > 0 and tonumber(fluid[7]) then
+        d.alarms.flux = fluid[7] / fluid[8] <= 0.10
+        if d.alarms.flux then d.warnings[#d.warnings + 1] = "LOW STELLAR FLUX" end
+      end
+      if d.heat and d.maxHeat and d.maxHeat > 0 and d.heat / d.maxHeat >= 0.90 then d.status = "WARNING" end
+      if #d.warnings > 0 then d.status = "WARNING" elseif (d.power or 0) > 0 or (d.heat or 0) > 0 then d.status = "ACTIVE" elseif d.heat ~= nil then d.status = "STANDBY" else d.status = "NO DATA" end
+      data[reactor.address] = d
+    end
+    local function refresh()
+      local keep = reactors[selected] and reactors[selected].address
+      reactors = {}
+      for _, address in ipairs(componentAddresses("ntm_icf_reactor")) do reactors[#reactors + 1] = { address = address } end
+      table.sort(reactors, function(a, b) return a.address < b.address end)
+      selected, data = 1, {}
+      for i, reactor in ipairs(reactors) do if reactor.address == keep then selected = i end; read(reactor) end
+    end
+    local function draw()
+      cls()
+      local dark, panel, cyan, soft = 0x0A1218, 0x14212B, 0x36D6D6, 0xAFC2CB
+      hits, tabHits = {}, {}
+      color(dark, dark); gpu.fill(1, 1, W, 1, " ")
+      color(dark, cyan); gpu.set(2, 1, "REACTOS  /  ICF CONTROL")
+      color(0x101A22, 0xFFFFFF); gpu.fill(1, 2, W, 2, " "); gpu.set(2, 2, "INERTIAL CONFINEMENT FUSION")
+      color(0x101A22, soft); gpu.set(2, 3, page == 1 and "MULTI-REACTOR OVERVIEW  |  Live telemetry" or "GAUGES + INDICATORS  |  Multi-ICF alarm summary")
+      local tx = math.max(2, W - 26)
+      for _, tab in ipairs({ { "OVERVIEW", 1 }, { "GAUGES", 2 } }) do
+        local label = "[ " .. tab[1] .. " ]"; local tw = unicode.len(label)
+        color(0x101A22, page == tab[2] and cyan or soft); gpu.set(tx, 3, label)
+        tabHits[#tabHits + 1] = { tx, tx + tw - 1, tab[2] }; tx = tx + tw + 1
+      end
+      local colorByStatus = function(status) return status == "ACTIVE" and GREEN or status == "WARNING" and RED or status == "NO DATA" and GRAY or 0xFFD166 end
+      if page == 1 then
+        local count = #reactors
+        color(panel, panel); gpu.fill(2, 5, W - 3, 3, " ")
+        color(panel, cyan); gpu.set(3, 5, "CONNECTED ICF UNITS")
+        color(panel, WHITE); gpu.set(3, 6, tostring(count) .. " reactor" .. (count == 1 and "" or "s") .. " detected")
+        color(panel, soft); gpu.set(3, 7, "Up/Down or touch a reactor to inspect")
+        local listTop, rowH = 9, 3
+        local panelY = H >= 20 and math.max(10, H - 7) or H
+        local rows = math.max(1, math.floor((panelY - listTop - 1) / rowH))
+        local first = math.max(1, math.min(selected, math.max(1, count - rows + 1)))
+        for i = first, math.min(count, first + rows - 1) do
+          local y, d = listTop + (i - first) * rowH, data[reactors[i].address]
+          local bg = i == selected and 0x1D303B or panel
+          color(bg, bg); gpu.fill(2, y, W - 3, 2, " ")
+          color(bg, cyan); gpu.set(4, y, "ICF REACTOR " .. string.format("%02d", i))
+          color(bg, colorByStatus(d.status)); gpu.set(math.max(4, W - 14), y, d.status)
+          local summary = "HEAT " .. fmt(d.heat) .. "/" .. fmt(d.maxHeat) .. " TU   LASERS " .. fmt(d.power) .. " TU   FLUX " .. fmt(d.fluid and d.fluid[7]) .. "/" .. fmt(d.fluid and d.fluid[8]) .. " mB"
+          color(bg, soft); gpu.set(4, y + 1, unicode.sub(summary, 1, math.max(1, W - 8)))
+          hits[#hits + 1] = { 2, y, W - 1, y + 1, i }
+        end
+        if count == 0 then color(panel, RED); gpu.set(4, 10, "NO ICF REACTORS DETECTED"); color(panel, soft); gpu.set(4, 12, "Connect an ntm_icf_reactor and press R to rescan.") end
+        local reactor, d = reactors[selected], reactors[selected] and data[reactors[selected].address]
+        if d and H >= 20 then
+          local y = panelY
+          color(panel, panel); gpu.fill(2, y, W - 3, 4, " ")
+          color(panel, cyan); gpu.set(3, y, "SELECTED REACTOR  " .. string.format("%02d", selected) .. "  |  " .. (reactor.address or "" ):sub(1, 8))
+          color(panel, soft); gpu.set(3, y + 1, "PELLETS: " .. d.fuel1 .. " + " .. d.fuel2)
+          local alerts = #d.warnings > 0 and table.concat(d.warnings, "  |  ") or "ALL MONITORED INDICATORS NORMAL"
+          color(panel, #d.warnings > 0 and RED or GREEN); gpu.set(3, y + 2, unicode.sub(alerts, 1, math.max(1, W - 5)))
+          color(panel, soft); gpu.set(3, y + 3, "Page 2: gauges and fleet-wide indicators")
+        end
+      else
+        local alarmDefs = { { "HIGH HEAT", "hot" }, { "HOT COOLANT", "hotCoolant" }, { "COLD COOLANT", "coldCoolant" }, { "LOW STELLAR FLUX", "flux" } }
+        local alarmX = 2; local tileGap = 1; local tileW = math.max(1, math.floor((W - 4 - 3 * tileGap) / 4))
+        for i, def in ipairs(alarmDefs) do
+          local count, known = 0, false
+          for _, reactor in ipairs(reactors) do local a = data[reactor.address].alarms[def[2]]; if a ~= nil then known = true; if a then count = count + 1 end end end
+          local state = #reactors == 0 and "NO ICF" or (not known and "NO DATA" or (count > 0 and (tostring(count) .. " ALARM") or "NORMAL"))
+          local c = (#reactors == 0 or not known) and GRAY or (count > 0 and RED or GREEN)
+          local x = alarmX + (i - 1) * (tileW + tileGap); color(c, c); gpu.fill(x, 5, tileW, 3, " ")
+          local inside = count > 0 and 0x3A1C20 or (c == GREEN and 0x12352B or 0x26313A)
+          color(inside, WHITE); gpu.fill(x + 1, 6, math.max(1, tileW - 2), 1, " "); gpu.set(x + 1, 6, unicode.sub(def[1], 1, math.max(1, tileW - 2)))
+          color(inside, c); gpu.set(x + 1, 7, state)
+        end
+        local reactor, d = reactors[selected], reactors[selected] and data[reactors[selected].address]
+        color(panel, panel); gpu.fill(2, 9, W - 3, 1, " ")
+        color(panel, cyan); gpu.set(3, 9, "REACTOR " .. string.format("%02d", selected) .. " / " .. tostring(#reactors) .. "    " .. (reactor and reactor.address:sub(1, 8) or "NO UNIT"))
+        local metricTop = 11
+        if d then
+          for i, m in ipairs(d.metrics) do
+            local y = metricTop + i - 1
+            if y > H - 2 then break end
+            local labelW = math.min(20, math.max(12, math.floor(W * 0.25)))
+            color((i % 2 == 0) and 0x101A22 or panel, (i % 2 == 0) and 0x101A22 or panel); gpu.fill(2, y, W - 3, 1, " ")
+            local bg = (i % 2 == 0) and 0x101A22 or panel
+            color(bg, soft); gpu.set(3, y, unicode.sub(m[1], 1, labelW))
+            local barX, barW = 4 + labelW, math.max(3, math.floor(W * 0.34))
+            if m[3] and m[4] and m[4] > 0 then
+              local ratio = math.max(0, math.min(1, m[3] / m[4])); color(bg, 0x263742); gpu.fill(barX, y, barW, 1, " "); color(bg, ratio >= 0.9 and 0xFF9B62 or cyan); gpu.fill(barX, y, math.floor(barW * ratio), 1, " ")
+            end
+            color(bg, WHITE); gpu.set(math.min(W - 2, barX + barW + 2), y, unicode.sub(m[2], 1, math.max(1, W - barX - barW - 4)))
+          end
+          color(panel, soft); gpu.set(3, H - 1, "PELLETS: " .. unicode.sub(d.fuel1 .. " + " .. d.fuel2, 1, math.max(1, W - 14)))
+        end
+      end
+      color(GRAY, BLACK); gpu.fill(1, H, W, 1, " "); gpu.set(2, H, "UP/DOWN: SELECT ICF   |   R: RESCAN   |   G: PAGE   |   Q: CLOSE")
+    end
+    local function update() refresh(); draw() end
+    update(); local nextRefresh = computer.uptime() + 2
+    while true do
+      local e, _, x, code = pull(0.25)
+      if e == "key_down" then
+        if x == 113 or x == 81 or x == 27 or code == 1 then cls(); return
+        elseif x == 114 or x == 82 then update(); nextRefresh = computer.uptime() + 2
+        elseif x == 103 or x == 71 then page = page == 1 and 2 or 1; draw()
+        elseif code == 200 then selected = math.max(1, selected - 1); draw()
+        elseif code == 208 then selected = math.min(#reactors, selected + 1); draw() end
+      elseif e == "touch" then
+        local tabbed = false
+        for _, tab in ipairs(tabHits) do if x >= tab[1] and x <= tab[2] and code == 3 then page = tab[3]; draw(); tabbed = true; break end end
+        if not tabbed then for _, hit in ipairs(hits) do if x >= hit[1] and x <= hit[3] and code >= hit[2] and code <= hit[4] then selected = hit[5]; draw(); break end end end
+      end
+      if computer.uptime() >= nextRefresh then update(); nextRefresh = computer.uptime() + 2 end
+    end
+  end
+
   local function buildIcons()
     local icons = {
       { name = "ME Storage", box = 0x2060A0, glyph = "ME", app = "me" },
@@ -7127,6 +7294,7 @@ end
       { name = "Messages", box = 0x205030, glyph = "MSG", fg = 0xFFFFFF, app = "messages" },
       { name = "RBMK Console", box = 0x802020, glyph = "RBMK", fg = 0xFFFFFF, app = "rbmk" },
       { name = "Fusion Monitor", box = 0x205868, glyph = "FUSION", fg = 0xFFFFFF, app = "fusion" },
+      { name = "ICF Control", box = 0x905030, glyph = "ICF", fg = 0xFFFFFF, app = "icf" },
       { name = "ReactX", box = 0x203878, glyph = "DX", fg = 0xFFFFFF, app = "reactx" },
       { name = "ReactSLI", box = 0x604080, glyph = "SLI", fg = 0xFFFFFF, app = "reactsli" },
     }
@@ -7141,6 +7309,7 @@ end
     local items = {
       { label = "ME Storage", app = "me" }, { label = "RBMK Console", app = "rbmk" },
       { label = "Fusion Monitor", app = "fusion" },
+      { label = "ICF Control", app = "icf" },
       { label = "ReactX", app = "reactx" }, { label = "ReactSLI", app = "reactsli" },
       { label = "Settings", app = "settings" }, { label = "Notepad", app = "notepad" },
       { label = "Messages", app = "messages" },
@@ -7207,7 +7376,7 @@ end
     local hits, startBtn, done, ICONS = {}, nil, false, nil
     local appNames = {
       me = "ME Storage", rs = "RS Storage", settings = "Settings", notepad = "Notepad",
-      terminal = "Terminal", rbmk = "RBMK Console", fusion = "Fusion Monitor", reactx = "ReactX", reactsli = "ReactSLI", music = "Music Player",
+      terminal = "Terminal", rbmk = "RBMK Console", fusion = "Fusion Monitor", icf = "ICF Control", reactx = "ReactX", reactsli = "ReactSLI", music = "Music Player",
       gallery = "Gallery", messages = "Messages", credits = "Credits",
     }
     local function draw()
@@ -7248,6 +7417,7 @@ end
       elseif app == "credits" then creditsApp()
       elseif app == "rbmk" then launchRbmk()
       elseif app == "fusion" then fusionApp()
+      elseif app == "icf" then icfApp()
       elseif app == "reactx" then sharedReactXApp()
       elseif app == "reactsli" then sharedReactSliApp()
       elseif app == "settings" then settingsApp()
