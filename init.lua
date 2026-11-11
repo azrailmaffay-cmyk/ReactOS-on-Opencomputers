@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v4.1  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v4.2  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v4.1"
+local VERSION = "ReactOS-OC v4.2"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -2400,47 +2400,84 @@ local function doUpdate(say)
   local readOnlyOk, readOnly = inv(target, "isReadOnly")
   if readOnlyOk and readOnly then return nil, "the boot filesystem is read-only" end
   local updateDir = "/System32/updates"
-  local made, makeErr = fsMkdirs(target, updateDir)
-  if not made then return nil, makeErr end
   local stagePath = updateDir .. "/init.lua.new"
-  if fsExists(target, stagePath) then inv(target, "remove", stagePath) end
-  local remoteVersion, downloaded = downloadUpdate(say, target, stagePath)
-  if not remoteVersion then return nil, downloaded end
+  local filesystems = componentAddresses("filesystem")
+  table.sort(filesystems, function(a, b)
+    local function free(address)
+      local okTotal, total = inv(address, "spaceTotal")
+      local okUsed, used = inv(address, "spaceUsed")
+      return okTotal and okUsed and type(total) == "number" and type(used) == "number" and (total - used) or -1
+    end
+    return free(a) > free(b)
+  end)
+  local stageAddress, remoteVersion, downloaded, downloadError
+  for _, address in ipairs(filesystems) do
+    local roOk, ro = inv(address, "isReadOnly")
+    if not (roOk and ro) then
+      local made = fsMkdirs(address, updateDir)
+      if made then
+        if fsExists(address, stagePath) then inv(address, "remove", stagePath) end
+        local version, sizeOrError = downloadUpdate(say, address, stagePath)
+        if version then stageAddress, remoteVersion, downloaded = address, version, sizeOrError; break end
+        downloadError = sizeOrError
+        if not tostring(downloadError):lower():find("space", 1, true) and not tostring(downloadError):lower():find("write", 1, true)
+            and not tostring(downloadError):lower():find("destination", 1, true) then break end
+      end
+    end
+  end
+  if not remoteVersion then return nil, "could not stage the update on any connected writable filesystem: " .. tostring(downloadError or "no suitable filesystem") end
+  say("Update staged on " .. (stageAddress == target and "boot drive" or (letterOf(stageAddress) .. ": / secondary filesystem")))
   local currentHead = fsReadPrefix(target, "/init.lua", 4096) or VERSION
   local currentVersion = currentHead:match("ReactOS%-OC v[%d%.]+") or VERSION
   say("Installed version: " .. currentVersion .. " | GitHub version: " .. remoteVersion .. " (" .. commas(downloaded) .. " bytes)")
   if not versionNewer(remoteVersion, currentVersion) then
-    inv(target, "remove", stagePath)
+    inv(stageAddress, "remove", stagePath)
     return true, "ReactOS is already at this version or newer."
   end
-  local newHead = fsReadPrefix(target, stagePath, 4096)
-  if not newHead or not newHead:find("ReactOS%-OC") then inv(target, "remove", stagePath); return nil, "staged update failed verification" end
+  local newHead = fsReadPrefix(stageAddress, stagePath, 4096)
+  if not newHead or not newHead:find("ReactOS%-OC") then inv(stageAddress, "remove", stagePath); return nil, "staged update failed verification" end
   if not confirm("Install " .. remoteVersion .. "? The old init.lua will be removed after the new file is verified.") then
-    inv(target, "remove", stagePath)
+    inv(stageAddress, "remove", stagePath)
     return true, "Update cancelled; the installed version was not changed."
   end
-  local previous = updateDir .. "/init.lua.previous"
   local oldSize = fsFileSize(target, "/init.lua")
-  if not oldSize then inv(target, "remove", stagePath); return nil, "cannot verify the installed /init.lua" end
-  -- The verified download is already staged on the boot filesystem. Rename the
-  -- old boot file aside, then move the staged file into place: this avoids
-  -- doInstall's extra full-size copy and needs roughly old + new file space.
-  if fsExists(target, previous) then inv(target, "remove", previous) end
-  local oldMoved, moveErr = inv(target, "rename", "/init.lua", previous)
-  if not oldMoved or not moveErr then inv(target, "remove", stagePath); return nil, "could not move the old init.lua aside" end
-  local newMoved, newErr = inv(target, "rename", stagePath, "/init.lua")
-  if not newMoved or not newErr then
-    inv(target, "rename", previous, "/init.lua")
-    inv(target, "remove", stagePath)
-    return nil, "could not install the staged file; restored the old init.lua"
+  if not oldSize then inv(stageAddress, "remove", stagePath); return nil, "cannot verify the installed /init.lua" end
+  local okTotal, total = inv(target, "spaceTotal")
+  local okUsed, used = inv(target, "spaceUsed")
+  if okTotal and okUsed and type(total) == "number" and type(used) == "number" and total - used + oldSize < downloaded then
+    inv(stageAddress, "remove", stagePath)
+    return nil, "the boot drive cannot hold the new init.lua even after removing the old copy"
+  end
+  local previous = updateDir .. "/init.lua.previous"
+  local hasBackup = false
+  if stageAddress ~= target then
+    if fsExists(stageAddress, previous) then inv(stageAddress, "remove", previous) end
+    local copied, _, count = fsCopy(target, "/init.lua", stageAddress, previous)
+    hasBackup = copied and count == oldSize and fsFileSize(stageAddress, previous) == oldSize
+    if not hasBackup and fsExists(stageAddress, previous) then inv(stageAddress, "remove", previous) end
+  end
+  -- Free the boot disk before copying from a secondary, larger filesystem.
+  -- The downloaded file remains intact on that drive throughout the swap.
+  local removed, removeResult = inv(target, "remove", "/init.lua")
+  if not removed or not removeResult then inv(stageAddress, "remove", stagePath); return nil, "could not remove the old /init.lua" end
+  local installed, installError
+  if stageAddress == target then
+    installed, installError = inv(target, "rename", stagePath, "/init.lua")
+  else
+    installed, installError = fsCopy(stageAddress, stagePath, target, "/init.lua")
+  end
+  if not installed then
+    if hasBackup then fsCopy(stageAddress, previous, target, "/init.lua") end
+    return nil, "new file copy failed: " .. tostring(installError or "copy failed") .. (hasBackup and " (old version restored)" or ("; update remains on " .. letterOf(stageAddress) .. ":" .. stagePath))
   end
   local installedSize, installedHead = fsFileSize(target, "/init.lua"), fsReadPrefix(target, "/init.lua", 4096)
   if installedSize ~= downloaded or not installedHead or not installedHead:find(remoteVersion, 1, true) then
     inv(target, "remove", "/init.lua")
-    inv(target, "rename", previous, "/init.lua")
-    return nil, "installed file verification failed; restored the old init.lua"
+    if hasBackup then fsCopy(stageAddress, previous, target, "/init.lua") end
+    return nil, "installed file verification failed" .. (hasBackup and "; old version restored" or "; staged update is preserved on the secondary drive")
   end
-  inv(target, "remove", previous)
+  inv(stageAddress, "remove", stagePath)
+  if hasBackup then inv(stageAddress, "remove", previous) end
   say("Update complete. Reboot to start " .. remoteVersion .. ".")
   return true
 end
@@ -2449,7 +2486,7 @@ def("update", "update", "Fetch and install the latest ReactOS-OC release from Gi
   local ok, result = doUpdate(function(message) out(message .. "\n") end)
   if not ok then color(BG, RED); out("Update failed: " .. tostring(result) .. "\n"); color(BG, FG)
   elseif result then out(result .. "\n") end
-end, "Downloads the latest init.lua from GitHub, verifies its release marker and version, stages it on the boot filesystem, then swaps it into place and removes the old file after verification to reduce storage use. Requires an Internet Card and HTTP enabled.")
+end, "Downloads the latest init.lua from GitHub, stages it on the filesystem with the most free space, then swaps it onto the boot drive and removes the old file to reduce storage use. Requires an Internet Card and HTTP enabled.")
 
 def("wget", "wget [-f] <url> [file]", "Download a file over HTTP/HTTPS", function(raw, a)
   local o, r = parseFlags(a)
