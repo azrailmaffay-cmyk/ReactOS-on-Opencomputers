@@ -2415,34 +2415,32 @@ local function doUpdate(say)
   end
   local newHead = fsReadPrefix(target, stagePath, 4096)
   if not newHead or not newHead:find("ReactOS%-OC") then inv(target, "remove", stagePath); return nil, "staged update failed verification" end
-  if not confirm("Install " .. remoteVersion .. "? A previous init.lua copy will be saved for rollback.") then
+  if not confirm("Install " .. remoteVersion .. "? The old init.lua will be removed after the new file is verified.") then
     inv(target, "remove", stagePath)
     return true, "Update cancelled; the installed version was not changed."
   end
-  local previous, previousTmp = updateDir .. "/init.lua.previous", updateDir .. "/init.lua.previous.new"
-  if fsExists(target, previousTmp) then inv(target, "remove", previousTmp) end
+  local previous = updateDir .. "/init.lua.previous"
   local oldSize = fsFileSize(target, "/init.lua")
   if not oldSize then inv(target, "remove", stagePath); return nil, "cannot verify the installed /init.lua" end
-  local copied, copyErr, count = fsCopy(target, "/init.lua", target, previousTmp)
-  if not copied or count ~= oldSize or fsFileSize(target, previousTmp) ~= oldSize then
-    inv(target, "remove", previousTmp); inv(target, "remove", stagePath)
-    return nil, "could not create rollback copy: " .. tostring(copyErr or "size mismatch")
-  end
+  -- The verified download is already staged on the boot filesystem. Rename the
+  -- old boot file aside, then move the staged file into place: this avoids
+  -- doInstall's extra full-size copy and needs roughly old + new file space.
   if fsExists(target, previous) then inv(target, "remove", previous) end
-  local renameOk, renamed = inv(target, "rename", previousTmp, previous)
-  if not renameOk or not renamed then inv(target, "remove", stagePath); return nil, "could not save rollback copy" end
-  local installed, installErr = doInstall(say, "C", "C:" .. stagePath)
-  inv(target, "remove", stagePath)
-  if not installed then
-    say("Update failed; restoring the saved init.lua...")
-    local restorePath = "/init.lua.restore.new"
-    local restoreOk = fsCopy(target, previous, target, restorePath)
-    if restoreOk then
-      if fsExists(target, "/init.lua") then inv(target, "remove", "/init.lua") end
-      inv(target, "rename", restorePath, "/init.lua")
-    end
-    return nil, tostring(installErr) .. (restoreOk and " (previous version restored)" or " (restore copy remains in " .. previous .. ")")
+  local oldMoved, moveErr = inv(target, "rename", "/init.lua", previous)
+  if not oldMoved or not moveErr then inv(target, "remove", stagePath); return nil, "could not move the old init.lua aside" end
+  local newMoved, newErr = inv(target, "rename", stagePath, "/init.lua")
+  if not newMoved or not newErr then
+    inv(target, "rename", previous, "/init.lua")
+    inv(target, "remove", stagePath)
+    return nil, "could not install the staged file; restored the old init.lua"
   end
+  local installedSize, installedHead = fsFileSize(target, "/init.lua"), fsReadPrefix(target, "/init.lua", 4096)
+  if installedSize ~= downloaded or not installedHead or not installedHead:find(remoteVersion, 1, true) then
+    inv(target, "remove", "/init.lua")
+    inv(target, "rename", previous, "/init.lua")
+    return nil, "installed file verification failed; restored the old init.lua"
+  end
+  inv(target, "remove", previous)
   say("Update complete. Reboot to start " .. remoteVersion .. ".")
   return true
 end
@@ -2451,7 +2449,7 @@ def("update", "update", "Fetch and install the latest ReactOS-OC release from Gi
   local ok, result = doUpdate(function(message) out(message .. "\n") end)
   if not ok then color(BG, RED); out("Update failed: " .. tostring(result) .. "\n"); color(BG, FG)
   elseif result then out(result .. "\n") end
-end, "Downloads the latest init.lua from the ReactOS-on-Opencomputers GitHub repository, verifies its release marker, backs up the current boot file to /System32/updates/init.lua.previous, and installs only if GitHub has a newer version. Requires an Internet Card and HTTP enabled.")
+end, "Downloads the latest init.lua from GitHub, verifies its release marker and version, stages it on the boot filesystem, then swaps it into place and removes the old file after verification to reduce storage use. Requires an Internet Card and HTTP enabled.")
 
 def("wget", "wget [-f] <url> [file]", "Download a file over HTTP/HTTPS", function(raw, a)
   local o, r = parseFlags(a)
@@ -5538,13 +5536,13 @@ local function drawSettings(W,H)
     for iy=0,bh do for ix=0,bw do
       if iy==0 or iy==bh or ix==0 or ix==bw then px(ox+ix,oy+iy,0x334455,0x000000,"+") end
     end end
-    px(ox+2,oy+bh//2,0x555555,0x000000,"COMPUTER")
+    px(ox+2,oy+math.floor(bh/2),0x555555,0x000000,"COMPUTER")
   end
   cube(bx,by); cube(tx,ty)
-  if side==2 then px(bx-3,by+bh//2,0xFF4444,0x000000,"RS<")
-  elseif side==3 then px(bx+bw+1,by+bh//2,0xFF4444,0x000000,">RS")
-  elseif side==4 then px(bx-3,by+bh//2,0xFF4444,0x000000,"RS<")
-  elseif side==5 then px(bx+bw+1,by+bh//2,0xFF4444,0x000000,">RS")
+  if side==2 then px(bx-3,by+math.floor(bh/2),0xFF4444,0x000000,"RS<")
+  elseif side==3 then px(bx+bw+1,by+math.floor(bh/2),0xFF4444,0x000000,">RS")
+  elseif side==4 then px(bx-3,by+math.floor(bh/2),0xFF4444,0x000000,"RS<")
+  elseif side==5 then px(bx+bw+1,by+math.floor(bh/2),0xFF4444,0x000000,">RS")
   else px(bx+2,by+bh-1,0x444444,0x000000,"(N/S/E/W)") end
   if side==0 then px(tx+2,ty+bh-1,0xFF4444,0x000000,"RS BOTTOM")
   elseif side==1 then px(tx+3,ty+1,0xFF4444,0x000000,"RS TOP")
@@ -5701,7 +5699,7 @@ local function drawHeader(W,wx,storm,vm)
   for i,v in ipairs(views) do
     px(tx,1,i==vm and 0x00FF88 or 0x444455,i==vm and 0x112211 or 0x0a0a1a,v); tx=tx+#v+1
   end
-  if scrammed then px(W//2-4,1,0xFF2222,0x0a0a1a,"!!AZ-5!!") end
+  if scrammed then px(math.floor(W/2)-4,1,0xFF2222,0x0a0a1a,"!!AZ-5!!") end
   local wStr=wx and (storm and "STORM" or (wx.rain and "RAIN" or "CLEAR")) or ""
   if #wStr>0 then px(W-#wStr-1,1,storm and 0xFF3333 or 0x44AAFF,0x0a0a1a,wStr) end
   gpu.setBackground(0x000000)
@@ -5733,7 +5731,7 @@ end
 
 local function drawStats(W,H,cols,maxX,maxY,d)
   local mapW=maxX+2; local mapX=W-mapW
-  local statW=mapX-3; local BL=math.max(5,math.min(W//4,statW-22))
+  local statW=mapX-3; local BL=math.max(5,math.min(math.floor(W/4),statW-22))
   local LW=18; local row=2
   px(mapX,2,0x334455,0x000000,"MAP")
   for y=0,maxY do for x=0,maxX do
@@ -5904,7 +5902,7 @@ local function drawGraph(W,H,d)
   px(gX-1,gY+gH+1,0x334455,0x000000,"+")
   local yRange=math.max(100,maxT-minT+50); local yLow=math.max(0,minT-25)
   px(1,gY,0x555555,0x000000,string.format("%4d",yLow+yRange))
-  px(1,gY+gH//2,0x555555,0x000000,string.format("%4d",yLow+yRange//2))
+  px(1,gY+math.floor(gH/2),0x555555,0x000000,string.format("%4d",yLow+math.floor(yRange/2)))
   px(1,gY+gH,0x555555,0x000000,string.format("%4d",yLow))
   local warnY=gY+gH-math.floor((WARN_TEMP-yLow)/yRange*gH)
   local scramY=gY+gH-math.floor((SCRAM_TEMP-yLow)/yRange*gH)
@@ -7594,6 +7592,135 @@ end
     end
   end
 
+  local function weatherTimeApp()
+    local location, weather, message, failed = nil, nil, "", false
+    local function encode(value)
+      return (tostring(value or ""):gsub("[^%w%-_%.~]", function(c) return string.format("%%%02X", c:byte()) end))
+    end
+    local function fieldString(object, key)
+      if not object then return nil end
+      return object:match('"' .. key .. '"%s*:%s*"([^"\\]*)"')
+    end
+    local function fieldNumber(object, key)
+      if not object then return nil end
+      return tonumber(object:match('"' .. key .. '"%s*:%s*(-?[%d%.]+)'))
+    end
+    local function search(city, state, country)
+      local terms = {}
+      for _, part in ipairs({ city, state, country }) do if part and trim(part) ~= "" then terms[#terms + 1] = trim(part) end end
+      if #terms == 0 then return nil, "Enter a city or location." end
+      local url = "https://geocoding-api.open-meteo.com/v1/search?name=" .. encode(table.concat(terms, ", ")) .. "&count=8&language=en&format=json"
+      local body, err = httpGet(url)
+      if not body then return nil, err end
+      local results = {}
+      for object in body:gmatch("{([^{}]*)}") do
+        local lat, lon = fieldNumber(object, "latitude"), fieldNumber(object, "longitude")
+        local name = fieldString(object, "name")
+        if lat and lon and name then
+          results[#results + 1] = {
+            name = name, admin = fieldString(object, "admin1") or "",
+            country = fieldString(object, "country") or "", latitude = lat, longitude = lon,
+            timezone = fieldString(object, "timezone") or "auto",
+          }
+        end
+      end
+      if #results == 0 then return nil, "No matching locations found." end
+      return results
+    end
+    local function chooseLocation(results)
+      out("\nMatching locations:\n")
+      for i, place in ipairs(results) do
+        out(string.format(" %d) %s%s%s\n", i, place.name, place.admin ~= "" and (", " .. place.admin) or "", place.country ~= "" and (", " .. place.country) or ""))
+      end
+      out("Choose a number (1-" .. #results .. "): ")
+      local choice = tonumber(trim(readline()))
+      if not choice or not results[choice] then return nil, "Location selection cancelled." end
+      return results[choice]
+    end
+    local function lookup(defaults)
+      local city, state, country
+      if defaults then city, state, country = "Mersin", "Mersin", "Turkey"
+      else
+        out("\nWeather location search\nCity or place: "); city = trim(readline())
+        out("State / province (optional): "); state = trim(readline())
+        out("Country: "); country = trim(readline())
+      end
+      local results, err = search(city, state, country)
+      if not results then message, failed = tostring(err), true; return false end
+      local place, choiceErr = chooseLocation(results)
+      if not place then message, failed = tostring(choiceErr), true; return false end
+      location = place
+      cfg.weatherName, cfg.weatherState, cfg.weatherCountry = place.name, place.admin, place.country
+      cfg.weatherLat, cfg.weatherLon, cfg.weatherTZ = tostring(place.latitude), tostring(place.longitude), place.timezone
+      cfgSave()
+      weather, message, failed = nil, "Location set. Loading current conditions...", false
+      return true
+    end
+    if cfg.weatherLat and cfg.weatherLon then
+      location = { name = cfg.weatherName or "Mersin", admin = cfg.weatherState or "Mersin", country = cfg.weatherCountry or "Turkey", latitude = tonumber(cfg.weatherLat), longitude = tonumber(cfg.weatherLon), timezone = cfg.weatherTZ or "auto" }
+    end
+    local function refresh()
+      if not location then
+        local ok = lookup(true)
+        if not ok then return end
+      end
+      local url = "https://api.open-meteo.com/v1/forecast?latitude=" .. tostring(location.latitude) .. "&longitude=" .. tostring(location.longitude)
+        .. "&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,wind_speed_10m&timezone=auto"
+      local body, err = httpGet(url)
+      if not body then message, failed = "Weather request failed: " .. tostring(err), true; return end
+      local current = body:match('"current"%s*:%s*{(.-)}')
+      if not current then message, failed = "Weather service returned no current conditions.", true; return end
+      weather = {
+        time = fieldString(current, "time") or "--",
+        temperature = fieldNumber(current, "temperature_2m"),
+        feels = fieldNumber(current, "apparent_temperature"), humidity = fieldNumber(current, "relative_humidity_2m"),
+        wind = fieldNumber(current, "wind_speed_10m"), rain = fieldNumber(current, "precipitation"),
+        code = fieldNumber(current, "weather_code"), daylight = fieldNumber(current, "is_day"),
+      }
+      message, failed = "Updated from Open-Meteo", false
+    end
+    local descriptions = { [0]="CLEAR SKY", [1]="MAINLY CLEAR", [2]="PARTLY CLOUDY", [3]="OVERCAST", [45]="FOG", [48]="RIME FOG", [51]="LIGHT DRIZZLE", [53]="DRIZZLE", [55]="HEAVY DRIZZLE", [61]="LIGHT RAIN", [63]="RAIN", [65]="HEAVY RAIN", [71]="LIGHT SNOW", [73]="SNOW", [75]="HEAVY SNOW", [80]="RAIN SHOWERS", [81]="SHOWERS", [82]="HEAVY SHOWERS", [95]="THUNDERSTORM", [96]="THUNDERSTORM / HAIL", [99]="SEVERE THUNDERSTORM" }
+    local function draw()
+      cls()
+      color(0x0A1218, 0x36D6D6); gpu.fill(1, 1, W, 1, " "); gpu.set(2, 1, "REACTOS  /  WEATHER + WORLD CLOCK")
+      color(0x101A22, WHITE); gpu.fill(1, 2, W, 2, " "); gpu.set(2, 2, "LIVE CONDITIONS  |  INTERNET CARD")
+      local placeName = location and (location.name .. (location.admin ~= "" and (", " .. location.admin) or "") .. (location.country ~= "" and (", " .. location.country) or "")) or "MERSIN, TURKEY"
+      color(0x101A22, 0xAFC2CB); gpu.set(2, 3, unicode.sub(placeName, 1, math.max(1, W - 4)))
+      color(0x14212B, 0x14212B); gpu.fill(2, 5, W - 3, 5, " ")
+      color(0x14212B, 0x36D6D6); gpu.set(4, 6, "LOCAL TIME")
+      color(0x14212B, WHITE); gpu.set(4, 7, weather and (weather.time:gsub("T", "  ")) or "Waiting for internet data...")
+      color(0x14212B, 0x36D6D6); gpu.set(math.max(4, math.floor(W * 0.48)), 6, "CURRENT WEATHER")
+      local condition = weather and (descriptions[weather.code] or ("WEATHER CODE " .. tostring(weather.code or "--"))) or "NO DATA"
+      color(0x14212B, WHITE); gpu.set(math.max(4, math.floor(W * 0.48)), 7, condition)
+      local temp = weather and weather.temperature and (string.format("%.1f C", weather.temperature)) or "-- C"
+      color(0x14212B, 0xFFD166); gpu.set(4, 8, temp .. (weather and weather.feels and ("   FEELS " .. string.format("%.1f C", weather.feels)) or ""))
+      local labels = {
+  { "HUMIDITY", weather and weather.humidity and (tostring(math.floor(weather.humidity + 0.5)) .. "%") or "--" },
+        { "WIND", weather and weather.wind and string.format("%.1f km/h", weather.wind) or "--" },
+        { "PRECIPITATION", weather and weather.rain and string.format("%.1f mm", weather.rain) or "--" },
+        { "DAYLIGHT", weather and (weather.daylight == 1 and "DAY" or "NIGHT") or "--" },
+      }
+      local columns = W >= 90 and 2 or 1; local cardW = math.max(1, math.floor((W - 5 - (columns - 1) * 2) / columns))
+      for i, item in ipairs(labels) do
+        local col, row = (i - 1) % columns, math.floor((i - 1) / columns)
+        local x, y = 2 + col * (cardW + 2), 11 + row * 3
+        color(0x14212B, 0x14212B); gpu.fill(x, y, cardW, 2, " "); color(0x14212B, 0xAFC2CB); gpu.set(x + 1, y, item[1]); color(0x14212B, WHITE); gpu.set(x + 1, y + 1, item[2])
+      end
+      color(0x0A1218, failed and RED or GREEN); gpu.set(2, H - 2, unicode.sub(message ~= "" and message or "Open-Meteo | live weather refreshes every 60 seconds", 1, math.max(1, W - 4)))
+      color(GRAY, BLACK); gpu.fill(1, H, W, 1, " "); gpu.set(2, H, "S: SEARCH LOCATION  |  R: REFRESH  |  Q: CLOSE")
+    end
+    refresh(); draw(); local nextRefresh = computer.uptime() + 60
+    while true do
+      local e, _, ch, code = pull(0.5)
+      if e == "key_down" then
+        if ch == 113 or ch == 81 or ch == 27 or code == 1 then cls(); return
+        elseif ch == 114 or ch == 82 then refresh(); nextRefresh = computer.uptime() + 60; draw()
+        elseif ch == 115 or ch == 83 then lookup(false); if not failed then refresh() end; nextRefresh = computer.uptime() + 60; draw() end
+      end
+      if computer.uptime() >= nextRefresh then refresh(); nextRefresh = computer.uptime() + 60; draw() end
+    end
+  end
+
   local function buildIcons()
     local icons = {
       { name = "ME Storage", box = 0x2060A0, glyph = "ME", app = "me" },
@@ -7604,6 +7731,7 @@ end
       { name = "RBMK Console", box = 0x802020, glyph = "RBMK", fg = 0xFFFFFF, app = "rbmk" },
       { name = "Fusion Monitor", box = 0x205868, glyph = "FUSION", fg = 0xFFFFFF, app = "fusion" },
       { name = "ICF Control", box = 0x905030, glyph = "ICF", fg = 0xFFFFFF, app = "icf" },
+      { name = "Weather & Time", box = 0x207080, glyph = "WX", fg = 0xFFFFFF, app = "weather" },
       { name = "ReactX", box = 0x203878, glyph = "DX", fg = 0xFFFFFF, app = "reactx" },
       { name = "ReactSLI", box = 0x604080, glyph = "SLI", fg = 0xFFFFFF, app = "reactsli" },
     }
@@ -7631,6 +7759,7 @@ end
       { label = "ME Storage", app = "me" }, { label = "RBMK Console", app = "rbmk" },
       { label = "Fusion Monitor", app = "fusion" },
       { label = "ICF Control", app = "icf" },
+      { label = "Weather & Time", app = "weather" },
       { label = "ReactX", app = "reactx" }, { label = "ReactSLI", app = "reactsli" },
       { label = "Settings", app = "settings" }, { label = "Notepad", app = "notepad" },
       { label = "Messages", app = "messages" },
@@ -7706,7 +7835,7 @@ end
     local hits, startBtn, done, ICONS = {}, nil, false, nil
     local appNames = {
       me = "ME Storage", rs = "RS Storage", settings = "Settings", notepad = "Notepad",
-      terminal = "Terminal", rbmk = "RBMK Console", fusion = "Fusion Monitor", icf = "ICF Control", radar = "NTM Radar", gasturbine = "Gas Turbine", vent = "Atmospheric Vent", stardar = "Stardar", rocketpad = "Rocket Pad", reactx = "ReactX", reactsli = "ReactSLI", music = "Music Player",
+      terminal = "Terminal", rbmk = "RBMK Console", fusion = "Fusion Monitor", icf = "ICF Control", weather = "Weather & Time", radar = "NTM Radar", gasturbine = "Gas Turbine", vent = "Atmospheric Vent", stardar = "Stardar", rocketpad = "Rocket Pad", reactx = "ReactX", reactsli = "ReactSLI", music = "Music Player",
       gallery = "Gallery", messages = "Messages", credits = "Credits",
     }
     local function draw()
@@ -7748,6 +7877,7 @@ end
       elseif app == "rbmk" then launchRbmk()
       elseif app == "fusion" then fusionApp()
       elseif app == "icf" then icfApp()
+      elseif app == "weather" then weatherTimeApp()
       elseif app == "radar" then ntmComponentApp("ntm_radar", "RADAR")
       elseif app == "gasturbine" then ntmComponentApp("ntm_gas_turbine", "GAS TURBINE")
       elseif app == "vent" then ntmComponentApp("ntm_atmospheric_vent", "ATMOSPHERIC VENT")
