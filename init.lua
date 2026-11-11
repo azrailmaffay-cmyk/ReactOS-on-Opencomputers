@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v4.2  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v4.3  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v4.2"
+local VERSION = "ReactOS-OC v4.3"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -7443,6 +7443,7 @@ end
 
   local function ntmComponentApp(kind, title)
     local devices, snapshots, tabs = {}, {}, {}
+    local planetByDevice = {}
     local selected, page = 1, 1
     local function call(address, method, ...)
       local values = {}
@@ -7477,24 +7478,50 @@ end
         d.status = sealed and (sealed[1] and "SEALED" or "CHECK SEAL") or "NO DATA"
       elseif kind == "ntm_stardar" then
         local current = call(address, "getCurrentPlanet")
-        local planet = current and current[1]
+        local homePlanet = current and current[1]
+        local homeSatellites = homePlanet and call(address, "getSatellites", homePlanet)
+        local satelliteList = homeSatellites and (type(homeSatellites[1]) == "table" and homeSatellites[1] or homeSatellites) or {}
+        local choices, seen = {}, {}
+        local function addChoice(value)
+          value = tostring(value or "")
+          if value ~= "" and not seen[value] then choices[#choices + 1] = value; seen[value] = true end
+        end
+        addChoice(homePlanet)
+        for _, item in ipairs(satelliteList) do addChoice(type(item) == "table" and (item.name or item[1]) or item) end
+        local planet = planetByDevice[address] or homePlanet
+        local found = false
+        for _, option in ipairs(choices) do if option == planet then found = true end end
+        if not found and planet then choices[#choices + 1] = planet end
+        d.planetIndex, d.planetOptions, d.currentPlanet = 1, choices, homePlanet
+        for i, option in ipairs(choices) do if option == planet then d.planetIndex = i end end
         local stats = planet and call(address, "getPlanetStats", planet)
         local satellites = planet and call(address, "getSatellites", planet)
         if stats and stats[1] ~= nil then
           local labels = { "PLANET", "PARENT BODY", "STAR", "TIDAL LOCK", "AXIAL TILT", "LANDABLE", "MASS", "PROCESSING LEVEL", "RADIUS", "ORBIT DISTANCE", "SUN POWER", "SURFACE GRAVITY", "ROTATION", "ORBIT PERIOD" }
+          d.planet = tostring(stats[1] or planet)
+          local landable = stats[6] == true and "LANDABLE" or (stats[6] == false and "NOT LANDABLE" or "UNKNOWN LANDING")
+          local sunlight = tonumber(stats[11])
+          local sunlightClass = sunlight and (sunlight >= 75 and "HIGH SUNLIGHT" or (sunlight >= 25 and "MODERATE SUNLIGHT" or "LOW SUNLIGHT")) or "SUNLIGHT UNKNOWN"
+          local gravity = tonumber(stats[12])
+          local gravityClass = gravity and (gravity < 3 and "LOW GRAVITY" or (gravity <= 12 and "NEAR TERRESTRIAL GRAVITY" or "HIGH GRAVITY")) or "GRAVITY UNKNOWN"
+          add("LANDING", landable)
+          add("SUNLIGHT PROFILE", sunlightClass .. (sunlight and ("  " .. fmt(sunlight) .. "%") or ""))
+          add("GRAVITY PROFILE", gravityClass .. (gravity and ("  " .. string.format("%.2f m/s2", gravity)) or ""))
+          add("PLANET RADIUS", fmt(stats[9]) .. " km")
           for i, label in ipairs(labels) do
             local v = stats[i]
             if i == 6 then v = v == true and "YES" or (v == false and "NO" or "--") end
-            if v ~= nil then add(label, tostring(v)) end
+            if v ~= nil then d.details[#d.details + 1] = label .. "  " .. tostring(v) end
           end
-        else add("CURRENT PLANET", tostring(planet or "--")) end
-        detail("CURRENT PLANET: " .. tostring(planet or "unknown"))
+        else d.planet = planet; add("PLANET", tostring(planet or "--")); detail("No statistics returned for this planet name") end
+        detail("EXAMINING: " .. tostring(planet or "unknown"))
+        detail("HOME BODY: " .. tostring(homePlanet or "unknown"))
         if satellites then
           local list = type(satellites[1]) == "table" and satellites[1] or satellites
           if #list == 0 then detail("SATELLITES: none reported") end
           for i = 1, math.min(#list, 18) do detail("SATELLITE  " .. tostring(type(list[i]) == "table" and (list[i].name or list[i][1]) or list[i])) end
         else detail("Satellite list unavailable") end
-        d.summary, d.status = planet and ("CURRENT BODY  " .. tostring(planet)) or "NO PLANET DATA", planet and "ONLINE" or "NO DATA"
+        d.summary, d.status = planet and ("PLANET PROFILE  " .. tostring(planet)) or "NO PLANET DATA", planet and (stats and stats[1] and "ANALYZED" or "NO PLANET DATA") or "NO DATA"
       elseif kind == "ntm_rocket_pad" then
         local energy, fuels = call(address, "getEnergyInfo"), call(address, "getFuel")
         local solid, canLaunch = call(address, "getSolidFuel"), call(address, "canLaunch")
@@ -7575,7 +7602,9 @@ end
         color(0x101A22, page == tab[2] and cyan or soft); gpu.set(tx, 3, label); tabs[#tabs + 1] = { tx, tx + width - 1, tab[2] }; tx = tx + width + 1
       end
       local address, d = devices[selected], devices[selected] and snapshots[devices[selected]]
-      color(panel, panel); gpu.fill(2, 5, W - 3, 3, " "); color(panel, cyan); gpu.set(3, 5, title .. "  " .. tostring(selected) .. " / " .. tostring(#devices))
+      color(panel, panel); gpu.fill(2, 5, W - 3, 3, " "); color(panel, cyan)
+      local selectedTitle = kind == "ntm_stardar" and (tostring(d and d.planet or "NO PLANET") .. "  [" .. tostring(d and d.planetIndex or 0) .. "/" .. tostring(d and #d.planetOptions or 0) .. "]") or (title .. "  " .. tostring(selected) .. " / " .. tostring(#devices))
+      gpu.set(3, 5, unicode.sub(selectedTitle, 1, math.max(1, W - 5)))
       local stateColor = d and (d.status == "JAMMED" or d.status == "HOLD" or d.status == "CHECK SEAL") and RED or GREEN
       color(panel, stateColor); gpu.set(3, 6, d and d.status or "NO COMPONENT FOUND")
       color(panel, soft); gpu.set(3, 7, d and unicode.sub(d.summary, 1, math.max(1, W - 5)) or "Connect the component, then press R to rescan.")
@@ -7609,7 +7638,8 @@ end
           for _, line in ipairs(d.details) do if y < H - 2 then color(panel, cyan); gpu.set(3, y, unicode.sub(line, 1, math.max(1, W - 5))); y = y + 1 end end
         end
       end
-      color(GRAY, BLACK); gpu.fill(1, H, W, 1, " "); gpu.set(2, H, "UP/DOWN: SELECT   |   R: RESCAN   |   G: PAGE   |   Q: CLOSE")
+      color(GRAY, BLACK); gpu.fill(1, H, W, 1, " ")
+      gpu.set(2, H, kind == "ntm_stardar" and "LEFT/RIGHT: PLANET   S: SEARCH   G: EXAMINE   Q: CLOSE" or "UP/DOWN: SELECT   |   R: RESCAN   |   G: PAGE   |   Q: CLOSE")
     end
     local function update() refresh(); draw() end
     update(); local nextRefresh = computer.uptime() + 2
@@ -7619,12 +7649,28 @@ end
         if x == 113 or x == 81 or x == 27 or y == 1 then cls(); return
         elseif x == 114 or x == 82 then update(); nextRefresh = computer.uptime() + 2
         elseif x == 103 or x == 71 then page = page == 1 and 2 or 1; draw()
+        elseif kind == "ntm_stardar" and (y == 203 or y == 205) and devices[selected] then
+          local d = snapshots[devices[selected]]
+          local count = d and #(d.planetOptions or {}) or 0
+          if count > 0 then
+            local delta = y == 205 and 1 or -1
+            d.planetIndex = ((d.planetIndex - 1 + delta) % count) + 1
+            planetByDevice[devices[selected]] = d.planetOptions[d.planetIndex]
+            read(devices[selected]); draw()
+          end
+        elseif kind == "ntm_stardar" and (x == 115 or x == 83) and devices[selected] then
+          out("\nPlanet name to examine: ")
+          local planetName = trim(readline())
+          if planetName ~= "" then planetByDevice[devices[selected]] = planetName; read(devices[selected]); draw() end
         elseif y == 200 then selected = math.max(1, selected - 1); draw()
         elseif y == 208 then selected = math.min(#devices, selected + 1); draw() end
       elseif e == "touch" then
         local changed = false
         for _, tab in ipairs(tabs) do if x >= tab[1] and x <= tab[2] and y == 3 then page = tab[3]; draw(); changed = true; break end end
-        if not changed and #devices > 1 and y == 5 then selected = selected % #devices + 1; draw() end
+        if not changed and kind == "ntm_stardar" and y == 5 and devices[selected] then
+          local d = snapshots[devices[selected]]; local count = d and #(d.planetOptions or {}) or 0
+          if count > 0 then d.planetIndex = d.planetIndex % count + 1; planetByDevice[devices[selected]] = d.planetOptions[d.planetIndex]; read(devices[selected]); draw() end
+        elseif not changed and #devices > 1 and y == 5 then selected = selected % #devices + 1; draw() end
       end
       if computer.uptime() >= nextRefresh then update(); nextRefresh = computer.uptime() + 2 end
     end
