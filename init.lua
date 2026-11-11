@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v3.7  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v3.8  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v3.7"
+local VERSION = "ReactOS-OC v3.8"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
