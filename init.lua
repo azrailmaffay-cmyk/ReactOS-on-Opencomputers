@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v3.6  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v3.7  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -7,7 +7,8 @@
 --
 --  INSTALL (from OpenOS):   <this-file-name> install      then   reboot
 --                           (if you saved it as "init":   init install)
---  Inside ReactOS:          install              (same thing)
+--  Inside ReactOS:          update               (fetch latest from GitHub)
+--                           install              (same thing)
 --  Check what boots next:   bootinfo
 --  Go back to OpenOS:       openos  (one time)   |   uninstall  (permanent)
 --  At boot press  O  to start the OpenOS backup instead.
@@ -30,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v3.6"
+local VERSION = "ReactOS-OC v3.7"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -2340,6 +2341,117 @@ local function httpGet(url, post, headers)
   pcall(req.close)
   return table.concat(t)
 end
+
+local REACTOS_UPDATE_URL = "https://raw.githubusercontent.com/azrailmaffay-cmyk/ReactOS-on-Opencomputers/main/init.lua"
+local function versionParts(text)
+  local version = tostring(text or ""):match("ReactOS%-OC v([%d%.]+)")
+  if not version then return nil end
+  local parts = {}
+  for n in version:gmatch("%d+") do parts[#parts + 1] = tonumber(n) end
+  return #parts > 0 and parts or nil
+end
+local function versionNewer(remote, current)
+  local a, b = versionParts(remote), versionParts(current)
+  if not a or not b then return false end
+  for i = 1, math.max(#a, #b) do
+    local x, y = a[i] or 0, b[i] or 0
+    if x ~= y then return x > y end
+  end
+  return false
+end
+local function downloadUpdate(say, address, path)
+  local internetAddress = first("internet")
+  if not internetAddress then return nil, "no Internet Card installed" end
+  local internet = component.proxy(internetAddress)
+  local requestOk, request, requestErr = pcall(internet.request, REACTOS_UPDATE_URL)
+  if not requestOk or not request then return nil, tostring(requestOk and requestErr or request) end
+  local openOk, handle, openErr = inv(address, "open", path, "w")
+  if not openOk or not handle then pcall(request.close); return nil, tostring(openOk and openErr or handle or "cannot create update file") end
+  local total, started, firstBytes, failure = 0, computer.uptime(), "", nil
+  say("Downloading the latest ReactOS source from GitHub...")
+  while true do
+    local readOk, chunk, why = pcall(request.read, 4096)
+    if not readOk then failure = tostring(chunk); break end
+    if chunk == nil then if why then failure = tostring(why) end; break end
+    if #chunk > 0 then
+      total = total + #chunk
+      if total > 4 * 1024 * 1024 then failure = "update is larger than the 4 MiB safety limit"; break end
+      if #firstBytes < 4096 then firstBytes = firstBytes .. chunk:sub(1, 4096 - #firstBytes) end
+      local writeOk, wrote, writeErr = inv(address, "write", handle, chunk)
+      if not writeOk or not wrote then failure = tostring(writeOk and writeErr or wrote or "write failed"); break end
+      if total % (256 * 1024) < #chunk then say("Downloaded " .. commas(total) .. " bytes...") end
+      started = computer.uptime()
+    else
+      if computer.uptime() - started > 30 then failure = "download timed out"; break end
+      local e, _, ch = pull(0.05)
+      if e == "key_down" and ch == 3 then failure = "cancelled"; break end
+    end
+  end
+  inv(address, "close", handle); pcall(request.close)
+  if failure then inv(address, "remove", path); return nil, failure end
+  if total < 2000 or not firstBytes:find("ReactOS%-OC") then inv(address, "remove", path); return nil, "download did not look like a ReactOS source file" end
+  local remoteVersion = firstBytes:match("ReactOS%-OC v[%d%.]+")
+  if not remoteVersion then inv(address, "remove", path); return nil, "could not find the release version in the downloaded source" end
+  return remoteVersion, total
+end
+local function doUpdate(say)
+  local target = drives.C or computer.getBootAddress()
+  if not target then return nil, "cannot find the ReactOS boot filesystem" end
+  local readOnlyOk, readOnly = inv(target, "isReadOnly")
+  if readOnlyOk and readOnly then return nil, "the boot filesystem is read-only" end
+  local updateDir = "/System32/updates"
+  local made, makeErr = fsMkdirs(target, updateDir)
+  if not made then return nil, makeErr end
+  local stagePath = updateDir .. "/init.lua.new"
+  if fsExists(target, stagePath) then inv(target, "remove", stagePath) end
+  local remoteVersion, downloaded = downloadUpdate(say, target, stagePath)
+  if not remoteVersion then return nil, downloaded end
+  local currentHead = fsReadPrefix(target, "/init.lua", 4096) or VERSION
+  local currentVersion = currentHead:match("ReactOS%-OC v[%d%.]+") or VERSION
+  say("Installed version: " .. currentVersion .. " | GitHub version: " .. remoteVersion .. " (" .. commas(downloaded) .. " bytes)")
+  if not versionNewer(remoteVersion, currentVersion) then
+    inv(target, "remove", stagePath)
+    return true, "ReactOS is already at this version or newer."
+  end
+  local newHead = fsReadPrefix(target, stagePath, 4096)
+  if not newHead or not newHead:find("ReactOS%-OC") then inv(target, "remove", stagePath); return nil, "staged update failed verification" end
+  if not confirm("Install " .. remoteVersion .. "? A previous init.lua copy will be saved for rollback.") then
+    inv(target, "remove", stagePath)
+    return true, "Update cancelled; the installed version was not changed."
+  end
+  local previous, previousTmp = updateDir .. "/init.lua.previous", updateDir .. "/init.lua.previous.new"
+  if fsExists(target, previousTmp) then inv(target, "remove", previousTmp) end
+  local oldSize = fsFileSize(target, "/init.lua")
+  if not oldSize then inv(target, "remove", stagePath); return nil, "cannot verify the installed /init.lua" end
+  local copied, copyErr, count = fsCopy(target, "/init.lua", target, previousTmp)
+  if not copied or count ~= oldSize or fsFileSize(target, previousTmp) ~= oldSize then
+    inv(target, "remove", previousTmp); inv(target, "remove", stagePath)
+    return nil, "could not create rollback copy: " .. tostring(copyErr or "size mismatch")
+  end
+  if fsExists(target, previous) then inv(target, "remove", previous) end
+  local renameOk, renamed = inv(target, "rename", previousTmp, previous)
+  if not renameOk or not renamed then inv(target, "remove", stagePath); return nil, "could not save rollback copy" end
+  local installed, installErr = doInstall(say, "C", "C:" .. stagePath)
+  inv(target, "remove", stagePath)
+  if not installed then
+    say("Update failed; restoring the saved init.lua...")
+    local restorePath = "/init.lua.restore.new"
+    local restoreOk = fsCopy(target, previous, target, restorePath)
+    if restoreOk then
+      if fsExists(target, "/init.lua") then inv(target, "remove", "/init.lua") end
+      inv(target, "rename", restorePath, "/init.lua")
+    end
+    return nil, tostring(installErr) .. (restoreOk and " (previous version restored)" or " (restore copy remains in " .. previous .. ")")
+  end
+  say("Update complete. Reboot to start " .. remoteVersion .. ".")
+  return true
+end
+
+def("update", "update", "Fetch and install the latest ReactOS-OC release from GitHub", function()
+  local ok, result = doUpdate(function(message) out(message .. "\n") end)
+  if not ok then color(BG, RED); out("Update failed: " .. tostring(result) .. "\n"); color(BG, FG)
+  elseif result then out(result .. "\n") end
+end, "Downloads the latest init.lua from the ReactOS-on-Opencomputers GitHub repository, verifies its release marker, backs up the current boot file to /System32/updates/init.lua.previous, and installs only if GitHub has a newer version. Requires an Internet Card and HTTP enabled.")
 
 def("wget", "wget [-f] <url> [file]", "Download a file over HTTP/HTTPS", function(raw, a)
   local o, r = parseFlags(a)
@@ -4942,7 +5054,7 @@ do
   }
 
   local function settingsApp()
-    local hit, closeBtn, rsToggle = {}, nil, nil
+    local hit, closeBtn, rsToggle, spaceToggle = {}, nil, nil, nil
     local function draw()
       cls()
       bar(1, "Settings - Background Color", GRAY, BLACK)
@@ -4964,7 +5076,12 @@ do
       local rsText = "Refined Storage Viewer (R): " .. rsState .. " - click to toggle"
       color(BG, FG); gpu.set(3, rsY, unicode.sub(rsText, 1, math.max(1, W - 4)))
       rsToggle = { 3, rsY, math.max(3, W - 2), rsY }
-      gpu.set(3, H - 2, unicode.sub(string.format("Current: #%06X | R toggles RS viewer | Esc closes", BG), 1, math.max(1, W - 4)))
+      local spaceY = math.max(3, H - 3)
+      local spaceState = (cfg.ntmspace == "1") and "ON" or "OFF"
+      local spaceText = "NTM Space Apps (N): " .. spaceState .. " - Vent, Stardar, Rocket Pad"
+      color(BG, FG); gpu.set(3, spaceY, unicode.sub(spaceText, 1, math.max(1, W - 4)))
+      spaceToggle = { 3, spaceY, math.max(3, W - 2), spaceY }
+      gpu.set(3, H - 2, unicode.sub(string.format("Current: #%06X | R: RS | N: NTM Space | Esc: close", BG), 1, math.max(1, W - 4)))
       local cx = W - 9
       color(GRAY, BLACK); gpu.fill(cx, H, 8, 1, " "); gpu.set(cx, H, " Close ")
       closeBtn = { cx, H, cx + 7, H }
@@ -4978,6 +5095,8 @@ do
         if x >= closeBtn[1] and x <= closeBtn[3] and y == closeBtn[4] then break
         elseif rsToggle and x >= rsToggle[1] and x <= rsToggle[3] and y == rsToggle[4] then
           cfg.rsviewer = (cfg.rsviewer == "1") and "0" or "1"; cfgSave(); draw()
+        elseif spaceToggle and x >= spaceToggle[1] and x <= spaceToggle[3] and y == spaceToggle[4] then
+          cfg.ntmspace = (cfg.ntmspace == "1") and "0" or "1"; cfgSave(); draw()
         else
           for _, r in ipairs(hit) do
             if x >= r[1] and x <= r[3] and y >= r[2] and y <= r[4] then applyTheme(r[5]); draw(); break end
@@ -4986,6 +5105,7 @@ do
       elseif kind == "key" then
         if a == 13 or a == 27 or b == 1 then break
         elseif a == 114 or a == 82 then cfg.rsviewer = (cfg.rsviewer == "1") and "0" or "1"; cfgSave(); draw()
+        elseif a == 110 or a == 78 then cfg.ntmspace = (cfg.ntmspace == "1") and "0" or "1"; cfgSave(); draw()
         else
           local n = tonumber(unicode.char(a or 0))
           if n == 0 then n = 10 end
@@ -7285,6 +7405,195 @@ end
     end
   end
 
+  local function ntmComponentApp(kind, title)
+    local devices, snapshots, tabs = {}, {}, {}
+    local selected, page = 1, 1
+    local function call(address, method, ...)
+      local values = {}
+      local args = { ... }
+      local function capture(...) for i = 1, select("#", ...) do values[i] = select(i, ...) end end
+      local ok = pcall(function() capture(component.invoke(address, method, unpackValues(args))) end)
+      return ok and values or nil
+    end
+    local function fmt(value)
+      local n = tonumber(value)
+      return n and commas(math.floor(n + 0.5)) or "--"
+    end
+    local function read(address)
+      local d = { rows = {}, details = {}, status = "NO DATA", summary = "Telemetry unavailable" }
+      local function add(label, value, amount, maximum, unit)
+        d.rows[#d.rows + 1] = { label, tostring(value or "--"), tonumber(amount), tonumber(maximum), unit or "" }
+      end
+      local function detail(value) d.details[#d.details + 1] = tostring(value) end
+      if kind == "ntm_atmospheric_vent" then
+        local fluid, atmosphere, sealed = call(address, "getFluid"), call(address, "getAtmosphereDetails"), call(address, "isSealed")
+        add("OXYGEN BUFFER", fmt(fluid and fluid[1]) .. " / " .. fmt(fluid and fluid[2]) .. " mB", fluid and fluid[1], fluid and fluid[2], "mB")
+        add("ATMOSPHERE", sealed and (sealed[1] and "SEALED" or "UNSEALED") or "--")
+        local entries = atmosphere and (type(atmosphere[1]) == "table" and atmosphere[1] or atmosphere) or {}
+        local found = false
+        for i = 1, #entries, 2 do
+          local fluidName, pressure = entries[i], entries[i + 1]
+          if type(fluidName) == "table" then fluidName, pressure = fluidName.name or fluidName.fluid or fluidName[1], fluidName.pressure or fluidName[2] end
+          if fluidName ~= nil then detail("" .. tostring(fluidName) .. "  |  PRESSURE " .. fmt(pressure)); found = true end
+        end
+        if not found then detail("No atmosphere composition reported") end
+        d.summary = sealed and (sealed[1] and "SEALED ATMOSPHERE" or "NOT SEALED") or "ATMOSPHERE STATUS UNKNOWN"
+        d.status = sealed and (sealed[1] and "SEALED" or "CHECK SEAL") or "NO DATA"
+      elseif kind == "ntm_stardar" then
+        local current = call(address, "getCurrentPlanet")
+        local planet = current and current[1]
+        local stats = planet and call(address, "getPlanetStats", planet)
+        local satellites = planet and call(address, "getSatellites", planet)
+        if stats and stats[1] ~= nil then
+          local labels = { "PLANET", "PARENT BODY", "STAR", "TIDAL LOCK", "AXIAL TILT", "LANDABLE", "MASS", "PROCESSING LEVEL", "RADIUS", "ORBIT DISTANCE", "SUN POWER", "SURFACE GRAVITY", "ROTATION", "ORBIT PERIOD" }
+          for i, label in ipairs(labels) do
+            local v = stats[i]
+            if i == 6 then v = v == true and "YES" or (v == false and "NO" or "--") end
+            if v ~= nil then add(label, tostring(v)) end
+          end
+        else add("CURRENT PLANET", tostring(planet or "--")) end
+        detail("CURRENT PLANET: " .. tostring(planet or "unknown"))
+        if satellites then
+          local list = type(satellites[1]) == "table" and satellites[1] or satellites
+          if #list == 0 then detail("SATELLITES: none reported") end
+          for i = 1, math.min(#list, 18) do detail("SATELLITE  " .. tostring(type(list[i]) == "table" and (list[i].name or list[i][1]) or list[i])) end
+        else detail("Satellite list unavailable") end
+        d.summary, d.status = planet and ("CURRENT BODY  " .. tostring(planet)) or "NO PLANET DATA", planet and "ONLINE" or "NO DATA"
+      elseif kind == "ntm_rocket_pad" then
+        local energy, fuels = call(address, "getEnergyInfo"), call(address, "getFuel")
+        local solid, canLaunch = call(address, "getSolidFuel"), call(address, "canLaunch")
+        local stats, destination = call(address, "getRocketStats"), call(address, "getDestination")
+        add("ENERGY BUFFER", fmt(energy and energy[1]) .. " / " .. fmt(energy and energy[2]) .. " HE", energy and energy[1], energy and energy[2], "HE")
+        add("SOLID FUEL", fmt(solid and solid[1]) .. " / " .. fmt(solid and solid[2]), solid and solid[1], solid and solid[2])
+        local fuelList = fuels and (type(fuels[1]) == "table" and fuels[1] or fuels) or {}
+        for i, tank in ipairs(fuelList) do
+          if type(tank) == "table" then
+            local amount, maximum, fluidName = tonumber(tank[1]), tonumber(tank[2]), tank[3]
+            add("FUEL " .. i, tostring(fluidName or "UNKNOWN") .. " " .. fmt(amount) .. " / " .. fmt(maximum) .. " mB", amount, maximum, "mB")
+          end
+        end
+        local launchOk = canLaunch and canLaunch[1]
+        add("LAUNCH CHECK", launchOk == true and "READY" or (launchOk == false and "NOT READY" or "--"))
+        add("DESTINATION", destination and tostring(destination[1]) or "--")
+        if stats and type(stats[1]) == "table" then stats = stats[1] end
+        if stats and stats[1] then
+          add("ROCKET STAGES", fmt(stats[1])); add("LAUNCH MASS", fmt(stats[2])); add("ROCKET HEIGHT", fmt(stats[3]))
+        else add("ROCKET", "NO VALID ROCKET DATA") end
+        d.status = launchOk == true and "READY" or (launchOk == false and "HOLD" or "NO DATA")
+        d.summary = launchOk == true and "LAUNCH REQUIREMENTS MET" or (launchOk == false and "LAUNCH CHECK FAILED" or "PAD STATUS UNKNOWN")
+      elseif kind == "ntm_radar" then
+        local settings, energy = call(address, "getSettings"), call(address, "getEnergyInfo")
+        local jammed, amount, range = call(address, "isJammed"), call(address, "getAmount"), call(address, "getRange")
+        add("RADAR STATUS", jammed and (jammed[1] and "JAMMED" or "CLEAR") or "--")
+        add("DETECTED CONTACTS", fmt(amount and amount[1]))
+        add("SCAN RANGE", fmt(range and range[1]) .. " m")
+        add("ENERGY BUFFER", fmt(energy and energy[1]) .. " / " .. fmt(energy and energy[2]) .. " HE", energy and energy[1], energy and energy[2], "HE")
+        local settingNames = { "MISSILES", "ARTILLERY", "PLAYERS", "SMART MODE" }
+        for i, label in ipairs(settingNames) do add("SCAN " .. label, settings and (settings[i] and "ON" or "OFF") or "--") end
+        local count = math.max(0, math.min(tonumber(amount and amount[1]) or 0, 8))
+        local blips = { [0]="TIER 0 MISSILE", [1]="TIER 1 MISSILE", [2]="TIER 2 MISSILE", [3]="TIER 3 MISSILE", [4]="TIER 4 MISSILE", [5]="CUSTOM MISSILE", [6]="CUSTOM MISSILE", [7]="CUSTOM MISSILE", [8]="CUSTOM MISSILE", [9]="CUSTOM MISSILE", [10]="AB MISSILE", [11]="PLAYER", [12]="ARTILLERY" }
+        for i = 1, count do
+          local entity = call(address, "getEntityAtIndex", i)
+          local item = entity and (type(entity[1]) == "table" and entity[1] or entity)
+          if item and item[2] ~= nil then
+            local label = item[1] and tostring(item[6] or "PLAYER") or (blips[tonumber(item[5])] or ("BLIP " .. tostring(item[5])))
+            detail(string.format("%02d  %-18s  X %s  Y %s  Z %s", i, label, fmt(item[2]), fmt(item[3]), fmt(item[4])))
+          end
+        end
+        if #d.details == 0 then detail("No radar contacts") end
+        local isJammed = jammed and jammed[1]
+        d.status = isJammed == true and "JAMMED" or (amount and "SCANNING" or "NO DATA")
+        d.summary = isJammed == true and "RADAR JAMMING DETECTED" or ("CONTACTS  " .. fmt(amount and amount[1]))
+      elseif kind == "ntm_gas_turbine" then
+        local fluid, gas, power, throttle, state, auto = call(address, "getFluid"), call(address, "getType"), call(address, "getPower"), call(address, "getThrottle"), call(address, "getState"), call(address, "getAuto")
+        local stateNames = { [0] = "SHUT DOWN", [-1] = "STARTING", [1] = "ONLINE" }
+        add("TURBINE STATE", state and (stateNames[tonumber(state[1])] or tostring(state[1])) or "--")
+        add("GAS FUEL", tostring(gas and gas[1] or "UNKNOWN") .. "  " .. fmt(fluid and fluid[1]) .. " / " .. fmt(fluid and fluid[2]) .. " mB", fluid and fluid[1], fluid and fluid[2], "mB")
+        add("ENGINE LUBRICANT", fmt(fluid and fluid[3]) .. " / " .. fmt(fluid and fluid[4]) .. " mB", fluid and fluid[3], fluid and fluid[4], "mB")
+        add("WATER", fmt(fluid and fluid[5]) .. " / " .. fmt(fluid and fluid[6]) .. " mB", fluid and fluid[5], fluid and fluid[6], "mB")
+        add("STEAM", fmt(fluid and fluid[7]) .. " / " .. fmt(fluid and fluid[8]) .. " mB", fluid and fluid[7], fluid and fluid[8], "mB")
+        add("POWER BUFFER", fmt(power and power[1]) .. " HE")
+        add("THROTTLE", fmt(throttle and throttle[1]) .. "%", throttle and throttle[1], 100, "%")
+        add("AUTOMATIC MODE", auto and (auto[1] and "ON" or "OFF") or "--")
+        d.status = state and tonumber(state[1]) ~= nil and (stateNames[tonumber(state[1])] or "ONLINE") or "NO DATA"
+        d.summary = "GAS  " .. tostring(gas and gas[1] or "UNKNOWN") .. "   |   POWER  " .. fmt(power and power[1]) .. " HE"
+      end
+      if #d.rows > 0 and d.status == "NO DATA" then d.status = "ONLINE" end
+      snapshots[address] = d
+    end
+    local function refresh()
+      local keep = devices[selected]
+      devices = componentAddresses(kind)
+      selected = 1
+      for i, address in ipairs(devices) do if address == keep then selected = i end; read(address) end
+    end
+    local function draw()
+      cls(); tabs = {}
+      local dark, panel, cyan, soft = 0x0A1218, 0x14212B, 0x36D6D6, 0xAFC2CB
+      color(dark, dark); gpu.fill(1, 1, W, 1, " "); color(dark, cyan); gpu.set(2, 1, "REACTOS  /  " .. title)
+      color(0x101A22, WHITE); gpu.fill(1, 2, W, 2, " "); gpu.set(2, 2, "NTM COMPONENT MONITOR")
+      color(0x101A22, soft); gpu.set(2, 3, page == 1 and "LIVE STATUS  |  refresh every 2 seconds" or "COMPONENT TELEMETRY  |  read-only")
+      local tx = math.max(2, W - 25)
+      for _, tab in ipairs({ { "OVERVIEW", 1 }, { "DETAILS", 2 } }) do
+        local label = "[ " .. tab[1] .. " ]"; local width = unicode.len(label)
+        color(0x101A22, page == tab[2] and cyan or soft); gpu.set(tx, 3, label); tabs[#tabs + 1] = { tx, tx + width - 1, tab[2] }; tx = tx + width + 1
+      end
+      local address, d = devices[selected], devices[selected] and snapshots[devices[selected]]
+      color(panel, panel); gpu.fill(2, 5, W - 3, 3, " "); color(panel, cyan); gpu.set(3, 5, title .. "  " .. tostring(selected) .. " / " .. tostring(#devices))
+      local stateColor = d and (d.status == "JAMMED" or d.status == "HOLD" or d.status == "CHECK SEAL") and RED or GREEN
+      color(panel, stateColor); gpu.set(3, 6, d and d.status or "NO COMPONENT FOUND")
+      color(panel, soft); gpu.set(3, 7, d and unicode.sub(d.summary, 1, math.max(1, W - 5)) or "Connect the component, then press R to rescan.")
+      if d then
+        if page == 1 then
+          local shown = math.min(4, #d.rows)
+          local columns = W >= 90 and 2 or 1
+          local cardW = math.max(1, math.floor((W - 5 - (columns - 1) * 2) / columns))
+          for i = 1, shown do
+            local col, row = (i - 1) % columns, math.floor((i - 1) / columns)
+            local x, y = 2 + col * (cardW + 2), 9 + row * 4
+            color(panel, panel); gpu.fill(x, y, cardW, 3, " "); color(panel, cyan); gpu.set(x + 1, y, unicode.sub(d.rows[i][1], 1, math.max(1, cardW - 3)))
+            color(panel, WHITE); gpu.set(x + 1, y + 1, unicode.sub(d.rows[i][2], 1, math.max(1, cardW - 3)))
+            local rowData = d.rows[i]
+            if rowData[3] and rowData[4] and rowData[4] > 0 then
+              local bw = math.max(3, cardW - 4); color(panel, 0x263742); gpu.fill(x + 1, y + 2, bw, 1, " ")
+              color(panel, (rowData[3] / rowData[4] >= 0.9) and 0xFF9B62 or cyan); gpu.fill(x + 1, y + 2, math.floor(bw * math.max(0, math.min(1, rowData[3] / rowData[4]))), 1, " ")
+            end
+          end
+          color(panel, soft); gpu.set(3, math.min(H - 2, 19), "COMPONENT ADDRESS  " .. tostring(address or "unavailable"))
+          if #devices > 1 then color(panel, soft); gpu.set(3, math.min(H - 1, 21), "Up/Down selects another connected component") end
+        else
+          local y = 9
+          for i, rowData in ipairs(d.rows) do
+            if y >= H - 2 then break end
+            local bg = i % 2 == 0 and 0x101A22 or panel
+            color(bg, bg); gpu.fill(2, y, W - 3, 1, " "); color(bg, soft); gpu.set(3, y, unicode.sub(rowData[1], 1, math.min(24, W - 8)))
+            color(bg, WHITE); gpu.set(math.min(W - 2, 29), y, unicode.sub(rowData[2], 1, math.max(1, W - 31)))
+            y = y + 1
+          end
+          for _, line in ipairs(d.details) do if y < H - 2 then color(panel, cyan); gpu.set(3, y, unicode.sub(line, 1, math.max(1, W - 5))); y = y + 1 end end
+        end
+      end
+      color(GRAY, BLACK); gpu.fill(1, H, W, 1, " "); gpu.set(2, H, "UP/DOWN: SELECT   |   R: RESCAN   |   G: PAGE   |   Q: CLOSE")
+    end
+    local function update() refresh(); draw() end
+    update(); local nextRefresh = computer.uptime() + 2
+    while true do
+      local e, _, x, y = pull(0.25)
+      if e == "key_down" then
+        if x == 113 or x == 81 or x == 27 or y == 1 then cls(); return
+        elseif x == 114 or x == 82 then update(); nextRefresh = computer.uptime() + 2
+        elseif x == 103 or x == 71 then page = page == 1 and 2 or 1; draw()
+        elseif y == 200 then selected = math.max(1, selected - 1); draw()
+        elseif y == 208 then selected = math.min(#devices, selected + 1); draw() end
+      elseif e == "touch" then
+        local changed = false
+        for _, tab in ipairs(tabs) do if x >= tab[1] and x <= tab[2] and y == 3 then page = tab[3]; draw(); changed = true; break end end
+        if not changed and #devices > 1 and y == 5 then selected = selected % #devices + 1; draw() end
+      end
+      if computer.uptime() >= nextRefresh then update(); nextRefresh = computer.uptime() + 2 end
+    end
+  end
+
   local function buildIcons()
     local icons = {
       { name = "ME Storage", box = 0x2060A0, glyph = "ME", app = "me" },
@@ -7299,6 +7608,18 @@ end
       { name = "ReactSLI", box = 0x604080, glyph = "SLI", fg = 0xFFFFFF, app = "reactsli" },
     }
     if cfg.rsviewer == "1" then icons[#icons + 1] = { name = "RS Storage", box = 0x205080, glyph = "RS", app = "rs" } end
+    local componentsToApps = {
+      { "ntm_radar", "Radar", 0x805020, "RADAR", "radar" },
+      { "ntm_gas_turbine", "Gas Turbine", 0x306040, "GAS", "gasturbine" },
+    }
+    if cfg.ntmspace == "1" then
+      componentsToApps[#componentsToApps + 1] = { "ntm_atmospheric_vent", "Atmospheric Vent", 0x207080, "VENT", "vent" }
+      componentsToApps[#componentsToApps + 1] = { "ntm_stardar", "Stardar", 0x504080, "STAR", "stardar" }
+      componentsToApps[#componentsToApps + 1] = { "ntm_rocket_pad", "Rocket Pad", 0x805030, "PAD", "rocketpad" }
+    end
+    for _, app in ipairs(componentsToApps) do
+      if #componentAddresses(app[1]) > 0 then icons[#icons + 1] = { name = app[2], box = app[3], glyph = app[4], fg = 0xFFFFFF, app = app[5] } end
+    end
     icons[#icons + 1] = { name = "Music Player", box = 0x803060, glyph = "MUSIC", fg = 0xFFFFFF, app = "music" }
     icons[#icons + 1] = { name = "Gallery", box = 0x703060, glyph = "PHOTO", fg = 0xFFFFFF, app = "gallery" }
     return icons
@@ -7315,6 +7636,15 @@ end
       { label = "Messages", app = "messages" },
       { label = "Music Player", app = "music" }, { label = "Gallery", app = "gallery" }, { label = "Credits", app = "credits" }, { label = "Terminal", app = "terminal" },
     }
+    local componentsToApps = {
+      { "ntm_radar", "Radar", "radar" }, { "ntm_gas_turbine", "Gas Turbine", "gasturbine" },
+    }
+    if cfg.ntmspace == "1" then
+      componentsToApps[#componentsToApps + 1] = { "ntm_atmospheric_vent", "Atmospheric Vent", "vent" }
+      componentsToApps[#componentsToApps + 1] = { "ntm_stardar", "Stardar", "stardar" }
+      componentsToApps[#componentsToApps + 1] = { "ntm_rocket_pad", "Rocket Pad", "rocketpad" }
+    end
+    for _, entry in ipairs(componentsToApps) do if #componentAddresses(entry[1]) > 0 then items[#items + 1] = { label = entry[2], app = entry[3] } end end
     if cfg.rsviewer == "1" then table.insert(items, 2, { label = "RS Storage", app = "rs" }) end
     items[#items + 1] = { label = "Reboot", app = "reboot" }
     items[#items + 1] = { label = "Shut Down", app = "shutdown" }
@@ -7376,7 +7706,7 @@ end
     local hits, startBtn, done, ICONS = {}, nil, false, nil
     local appNames = {
       me = "ME Storage", rs = "RS Storage", settings = "Settings", notepad = "Notepad",
-      terminal = "Terminal", rbmk = "RBMK Console", fusion = "Fusion Monitor", icf = "ICF Control", reactx = "ReactX", reactsli = "ReactSLI", music = "Music Player",
+      terminal = "Terminal", rbmk = "RBMK Console", fusion = "Fusion Monitor", icf = "ICF Control", radar = "NTM Radar", gasturbine = "Gas Turbine", vent = "Atmospheric Vent", stardar = "Stardar", rocketpad = "Rocket Pad", reactx = "ReactX", reactsli = "ReactSLI", music = "Music Player",
       gallery = "Gallery", messages = "Messages", credits = "Credits",
     }
     local function draw()
@@ -7418,6 +7748,11 @@ end
       elseif app == "rbmk" then launchRbmk()
       elseif app == "fusion" then fusionApp()
       elseif app == "icf" then icfApp()
+      elseif app == "radar" then ntmComponentApp("ntm_radar", "RADAR")
+      elseif app == "gasturbine" then ntmComponentApp("ntm_gas_turbine", "GAS TURBINE")
+      elseif app == "vent" then ntmComponentApp("ntm_atmospheric_vent", "ATMOSPHERIC VENT")
+      elseif app == "stardar" then ntmComponentApp("ntm_stardar", "STARDAR")
+      elseif app == "rocketpad" then ntmComponentApp("ntm_rocket_pad", "ROCKET PAD")
       elseif app == "reactx" then sharedReactXApp()
       elseif app == "reactsli" then sharedReactSliApp()
       elseif app == "settings" then settingsApp()
@@ -8514,16 +8849,17 @@ end
 ------------------------------------------------------------------
 -- 17. Kernel entry
 ------------------------------------------------------------------
--- Command-line use inside OpenOS:  <file> install | <file> uninstall
+-- Command-line use inside OpenOS:  <file> update | <file> install | <file> uninstall
 if HOSTED and ARGS[1] then
   local c = ARGS[1]:lower()
-  if c == "install" or c == "uninstall" then
+  if c == "install" or c == "uninstall" or c == "update" then
     local ok, err
     if c == "install" then ok, err = doInstall(print, ARGS[2], ARGS[3])
-    else ok, err = doUninstall(print, ARGS[2]) end
+    elseif c == "uninstall" then ok, err = doUninstall(print, ARGS[2])
+    else ok, err = doUpdate(print) end
     if not ok then print("Failed: " .. tostring(err)) end
   else
-    print("Usage: <this file> [install [drive] [file] | uninstall [drive]]")
+    print("Usage: <this file> [update | install [drive] [file] | uninstall [drive]]")
   end
   return nil
 end
