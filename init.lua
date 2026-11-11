@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v3.9  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v4.0  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v3.9"
+local VERSION = "ReactOS-OC v4.0"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -7759,7 +7759,7 @@ end
       put(2, H - 2, message ~= "" and message or "Open-Meteo weather | TimeAPI timezone clock", failed and RED or GREEN, 0x0A1218, W - 4)
       color(GRAY, BLACK); gpu.fill(1, H, W, 1, " "); gpu.set(2, H, "S / TAP LOCATION: SEARCH   R: REFRESH   Q: CLOSE")
     end
-    refresh(); draw(); local nextRefresh = computer.uptime() + 60
+    refresh(); draw(); local nextRefresh, nextClockDraw = computer.uptime() + 60, computer.uptime() + 1
     while true do
       local e, _, ch, code = pull(0.2)
       if e == "key_down" then
@@ -7780,7 +7780,8 @@ end
         if chosen then selectLocation(chosen); refresh(); nextRefresh = computer.uptime() + 60; draw() end
       end
       if searching and searchDeadline and computer.uptime() >= searchDeadline then updateSuggestions(); draw() end
-      if computer.uptime() >= nextRefresh then refresh(); nextRefresh = computer.uptime() + 60; draw() end
+      if computer.uptime() >= nextRefresh then refresh(); nextRefresh = computer.uptime() + 60; nextClockDraw = computer.uptime() + 1; draw()
+      elseif not searching and computer.uptime() >= nextClockDraw then draw(); nextClockDraw = computer.uptime() + 1 end
     end
   end
 
