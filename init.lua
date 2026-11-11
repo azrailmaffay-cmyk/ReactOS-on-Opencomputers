@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v3.8  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v3.9  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v3.8"
+local VERSION = "ReactOS-OC v3.9"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -7594,6 +7594,8 @@ end
 
   local function weatherTimeApp()
     local location, weather, message, failed = nil, nil, "", false
+    local searching, query, suggestions, highlighted, searchDeadline = false, "", {}, 1, nil
+    local timeAnchor, timeAnchorUptime, timeZoneLabel
     local function encode(value)
       return (tostring(value or ""):gsub("[^%w%-_%.~]", function(c) return string.format("%%%02X", c:byte()) end))
     end
@@ -7605,11 +7607,9 @@ end
       if not object then return nil end
       return tonumber(object:match('"' .. key .. '"%s*:%s*(-?[%d%.]+)'))
     end
-    local function search(city, state, country)
-      local terms = {}
-      for _, part in ipairs({ city, state, country }) do if part and trim(part) ~= "" then terms[#terms + 1] = trim(part) end end
-      if #terms == 0 then return nil, "Enter a city or location." end
-      local url = "https://geocoding-api.open-meteo.com/v1/search?name=" .. encode(table.concat(terms, ", ")) .. "&count=8&language=en&format=json"
+    local function search(text)
+      if trim(text or "") == "" then return {} end
+      local url = "https://geocoding-api.open-meteo.com/v1/search?name=" .. encode(trim(text)) .. "&count=8&language=en&format=json"
       local body, err = httpGet(url)
       if not body then return nil, err end
       local results = {}
@@ -7627,42 +7627,30 @@ end
       if #results == 0 then return nil, "No matching locations found." end
       return results
     end
-    local function chooseLocation(results)
-      out("\nMatching locations:\n")
-      for i, place in ipairs(results) do
-        out(string.format(" %d) %s%s%s\n", i, place.name, place.admin ~= "" and (", " .. place.admin) or "", place.country ~= "" and (", " .. place.country) or ""))
-      end
-      out("Choose a number (1-" .. #results .. "): ")
-      local choice = tonumber(trim(readline()))
-      if not choice or not results[choice] then return nil, "Location selection cancelled." end
-      return results[choice]
-    end
-    local function lookup(defaults)
-      local city, state, country
-      if defaults then city, state, country = "Mersin", "Mersin", "Turkey"
-      else
-        out("\nWeather location search\nCity or place: "); city = trim(readline())
-        out("State / province (optional): "); state = trim(readline())
-        out("Country: "); country = trim(readline())
-      end
-      local results, err = search(city, state, country)
-      if not results then message, failed = tostring(err), true; return false end
-      local place, choiceErr = chooseLocation(results)
-      if not place then message, failed = tostring(choiceErr), true; return false end
+    local function selectLocation(place)
       location = place
       cfg.weatherName, cfg.weatherState, cfg.weatherCountry = place.name, place.admin, place.country
       cfg.weatherLat, cfg.weatherLon, cfg.weatherTZ = tostring(place.latitude), tostring(place.longitude), place.timezone
       cfgSave()
-      weather, message, failed = nil, "Location set. Loading current conditions...", false
-      return true
+      weather, timeAnchor, message, failed = nil, nil, "Location set. Loading live data...", false
+      searching, suggestions = false, {}
+    end
+    local function updateSuggestions()
+      searchDeadline = nil
+      if unicode.len(trim(query)) < 2 then suggestions = {}; return end
+      local results, err = search(query)
+      if not results then suggestions = {}; message, failed = tostring(err), true; return end
+      suggestions, highlighted, failed = results, 1, false
+      message = #results == 0 and "No places found. Try adding a region or country." or (tostring(#results) .. " matching places")
     end
     if cfg.weatherLat and cfg.weatherLon then
       location = { name = cfg.weatherName or "Mersin", admin = cfg.weatherState or "Mersin", country = cfg.weatherCountry or "Turkey", latitude = tonumber(cfg.weatherLat), longitude = tonumber(cfg.weatherLon), timezone = cfg.weatherTZ or "auto" }
     end
     local function refresh()
       if not location then
-        local ok = lookup(true)
-        if not ok then return end
+        local defaults, defaultErr = search("Mersin, Mersin, Turkey")
+        if not defaults or not defaults[1] then message, failed = tostring(defaultErr or "Mersin, Turkey not found"); return end
+        selectLocation(defaults[1])
       end
       local url = "https://api.open-meteo.com/v1/forecast?latitude=" .. tostring(location.latitude) .. "&longitude=" .. tostring(location.longitude)
         .. "&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,wind_speed_10m&timezone=auto"
@@ -7671,31 +7659,90 @@ end
       local current = body:match('"current"%s*:%s*{(.-)}')
       if not current then message, failed = "Weather service returned no current conditions.", true; return end
       weather = {
-        time = fieldString(current, "time") or "--",
         temperature = fieldNumber(current, "temperature_2m"),
         feels = fieldNumber(current, "apparent_temperature"), humidity = fieldNumber(current, "relative_humidity_2m"),
         wind = fieldNumber(current, "wind_speed_10m"), rain = fieldNumber(current, "precipitation"),
         code = fieldNumber(current, "weather_code"), daylight = fieldNumber(current, "is_day"),
       }
-      message, failed = "Updated from Open-Meteo", false
+      -- Use a timezone clock API, not the weather model's rounded timestamp.
+      local timeUrl = "https://timeapi.io/api/Time/current/zone?timeZone=" .. encode(location.timezone or "Europe/Istanbul")
+      local timeRequestStart = computer.uptime()
+      local timeBody = httpGet(timeUrl)
+      local timeRequestEnd = computer.uptime()
+      if timeBody then
+        local zone = timeBody:match('"timeZone"%s*:%s*"([^"\\]*)"') or location.timezone
+        local values = {
+          year = fieldNumber(timeBody, "year"), month = fieldNumber(timeBody, "month"), day = fieldNumber(timeBody, "day"),
+          hour = fieldNumber(timeBody, "hour"), minute = fieldNumber(timeBody, "minute"), second = fieldNumber(timeBody, "seconds"),
+        }
+        if values.year and values.month and values.day and values.hour and values.minute and values.second then
+          timeAnchor, timeAnchorUptime, timeZoneLabel = values, (timeRequestStart + timeRequestEnd) / 2, zone or location.timezone
+        end
+      end
+      message, failed = "Updated live weather and timezone clock", false
     end
     local descriptions = { [0]="CLEAR SKY", [1]="MAINLY CLEAR", [2]="PARTLY CLOUDY", [3]="OVERCAST", [45]="FOG", [48]="RIME FOG", [51]="LIGHT DRIZZLE", [53]="DRIZZLE", [55]="HEAVY DRIZZLE", [61]="LIGHT RAIN", [63]="RAIN", [65]="HEAVY RAIN", [71]="LIGHT SNOW", [73]="SNOW", [75]="HEAVY SNOW", [80]="RAIN SHOWERS", [81]="SHOWERS", [82]="HEAVY SHOWERS", [95]="THUNDERSTORM", [96]="THUNDERSTORM / HAIL", [99]="SEVERE THUNDERSTORM" }
+    local function localClock()
+      if not timeAnchor then return "--:--:--", "Waiting for time service" end
+      local elapsed = math.max(0, math.floor(computer.uptime() - timeAnchorUptime))
+      local values = { year=timeAnchor.year, month=timeAnchor.month, day=timeAnchor.day }
+      local daySeconds = timeAnchor.hour * 3600 + timeAnchor.minute * 60 + timeAnchor.second + elapsed
+      local extraDays = math.floor(daySeconds / 86400); daySeconds = daySeconds % 86400
+      values.hour = math.floor(daySeconds / 3600); values.minute = math.floor((daySeconds % 3600) / 60); values.second = daySeconds % 60
+      local function monthDays(y, m)
+        if m == 2 then return (y % 4 == 0 and (y % 100 ~= 0 or y % 400 == 0)) and 29 or 28 end
+        return (m == 4 or m == 6 or m == 9 or m == 11) and 30 or 31
+      end
+      while extraDays > 0 do
+        values.day = values.day + 1
+        if values.day > monthDays(values.year, values.month) then values.day = 1; values.month = values.month + 1; if values.month > 12 then values.month = 1; values.year = values.year + 1 end end
+        extraDays = extraDays - 1
+      end
+      return string.format("%02d:%02d:%02d", values.hour, values.minute, values.second), string.format("%04d-%02d-%02d", values.year, values.month, values.day)
+    end
+    local function put(x, y, value, fg, bg, width)
+      if y < 1 or y > H or x < 1 or x > W then return end
+      local maxWidth = math.min(width or (W - x + 1), W - x + 1)
+      if maxWidth <= 0 then return end
+      color(bg or 0x14212B, fg or WHITE); gpu.set(x, y, unicode.sub(tostring(value or ""), 1, maxWidth))
+    end
     local function draw()
       cls()
-      color(0x0A1218, 0x36D6D6); gpu.fill(1, 1, W, 1, " "); gpu.set(2, 1, "REACTOS  /  WEATHER + WORLD CLOCK")
-      color(0x101A22, WHITE); gpu.fill(1, 2, W, 2, " "); gpu.set(2, 2, "LIVE CONDITIONS  |  INTERNET CARD")
-      local placeName = location and (location.name .. (location.admin ~= "" and (", " .. location.admin) or "") .. (location.country ~= "" and (", " .. location.country) or "")) or "MERSIN, TURKEY"
-      color(0x101A22, 0xAFC2CB); gpu.set(2, 3, unicode.sub(placeName, 1, math.max(1, W - 4)))
-      color(0x14212B, 0x14212B); gpu.fill(2, 5, W - 3, 5, " ")
-      color(0x14212B, 0x36D6D6); gpu.set(4, 6, "LOCAL TIME")
-      color(0x14212B, WHITE); gpu.set(4, 7, weather and (weather.time:gsub("T", "  ")) or "Waiting for internet data...")
-      color(0x14212B, 0x36D6D6); gpu.set(math.max(4, math.floor(W * 0.48)), 6, "CURRENT WEATHER")
+      put(2, 1, "REACTOS  /  WEATHER + WORLD CLOCK", 0x36D6D6, 0x0A1218, W - 3)
+      color(0x101A22, WHITE); gpu.fill(1, 2, W, 2, " ")
+      put(2, 2, searching and "LOCATION SEARCH  |  type a place name" or "LIVE CONDITIONS  |  INTERNET CARD", WHITE, 0x101A22, W - 3)
+      if searching then
+        color(0x101A22, 0xAFC2CB); gpu.fill(2, 4, W - 3, 2, " ")
+        put(3, 4, "CITY, STATE / PROVINCE, COUNTRY", 0xAFC2CB, 0x101A22, W - 5)
+        put(3, 5, "> " .. query .. "_", WHITE, 0x101A22, W - 5)
+        local maxRows = math.max(1, H - 9)
+        for i = 1, math.min(#suggestions, maxRows) do
+          local y = 7 + i - 1; local bg = i == highlighted and 0x1D303B or 0x14212B
+          color(bg, bg); gpu.fill(2, y, W - 3, 1, " ")
+          local p = suggestions[i]
+          put(3, y, (i == highlighted and "> " or "  ") .. p.name .. (p.admin ~= "" and (", " .. p.admin) or "") .. (p.country ~= "" and (", " .. p.country) or ""), i == highlighted and 0x36D6D6 or WHITE, bg, W - 5)
+        end
+        if unicode.len(trim(query)) < 2 then put(3, 7, "Type at least two characters for suggestions", 0xAFC2CB, 0x0A1218, W - 5)
+        elseif searchDeadline then put(3, 7, "Searching...", 0xAFC2CB, 0x0A1218, W - 5)
+        elseif #suggestions == 0 then put(3, 7, failed and message or "No matches yet. Add a region or country.", failed and RED or 0xAFC2CB, 0x0A1218, W - 5) end
+        put(2, H - 1, "UP/DOWN: CHOOSE   ENTER: SET   ESC: CANCEL", GRAY, BLACK, W - 3)
+        return
+      end
+      local placeName = location and (location.name .. (location.admin ~= "" and (", " .. location.admin) or "") .. (location.country ~= "" and (", " .. location.country) or "")) or "MERSIN, MERSIN, TURKEY"
+      put(2, 4, placeName, 0xAFC2CB, 0x0A1218, W - 4)
+      color(0x14212B, 0x14212B); gpu.fill(2, 6, W - 3, 5, " ")
+      local clock, date = localClock()
+      local mid = math.max(4, math.floor(W * 0.48))
+      put(4, 7, "LOCAL TIME  " .. (timeZoneLabel or location and location.timezone or ""), 0x36D6D6, 0x14212B, math.max(1, mid - 5))
+      put(4, 8, clock, WHITE, 0x14212B, math.max(1, mid - 5))
+      put(4, 9, date, 0xAFC2CB, 0x14212B, math.max(1, mid - 5))
+      put(mid, 7, "CURRENT WEATHER", 0x36D6D6, 0x14212B, W - mid - 2)
       local condition = weather and (descriptions[weather.code] or ("WEATHER CODE " .. tostring(weather.code or "--"))) or "NO DATA"
-      color(0x14212B, WHITE); gpu.set(math.max(4, math.floor(W * 0.48)), 7, condition)
-      local temp = weather and weather.temperature and (string.format("%.1f C", weather.temperature)) or "-- C"
-      color(0x14212B, 0xFFD166); gpu.set(4, 8, temp .. (weather and weather.feels and ("   FEELS " .. string.format("%.1f C", weather.feels)) or ""))
+      put(mid, 8, condition, WHITE, 0x14212B, W - mid - 2)
+      local temp = weather and weather.temperature and string.format("%.1f C", weather.temperature) or "-- C"
+      put(mid, 9, temp .. (weather and weather.feels and ("  FEELS " .. string.format("%.1f C", weather.feels)) or ""), 0xFFD166, 0x14212B, W - mid - 2)
       local labels = {
-  { "HUMIDITY", weather and weather.humidity and (tostring(math.floor(weather.humidity + 0.5)) .. "%") or "--" },
+        { "HUMIDITY", weather and weather.humidity and (tostring(math.floor(weather.humidity + 0.5)) .. "%") or "--" },
         { "WIND", weather and weather.wind and string.format("%.1f km/h", weather.wind) or "--" },
         { "PRECIPITATION", weather and weather.rain and string.format("%.1f mm", weather.rain) or "--" },
         { "DAYLIGHT", weather and (weather.daylight == 1 and "DAY" or "NIGHT") or "--" },
@@ -7703,20 +7750,36 @@ end
       local columns = W >= 90 and 2 or 1; local cardW = math.max(1, math.floor((W - 5 - (columns - 1) * 2) / columns))
       for i, item in ipairs(labels) do
         local col, row = (i - 1) % columns, math.floor((i - 1) / columns)
-        local x, y = 2 + col * (cardW + 2), 11 + row * 3
-        color(0x14212B, 0x14212B); gpu.fill(x, y, cardW, 2, " "); color(0x14212B, 0xAFC2CB); gpu.set(x + 1, y, item[1]); color(0x14212B, WHITE); gpu.set(x + 1, y + 1, item[2])
+        local x, y = 2 + col * (cardW + 2), 12 + row * 3
+        if y + 1 < H - 2 then
+          color(0x14212B, 0x14212B); gpu.fill(x, y, cardW, 2, " ")
+          put(x + 1, y, item[1], 0xAFC2CB, 0x14212B, cardW - 2); put(x + 1, y + 1, item[2], WHITE, 0x14212B, cardW - 2)
+        end
       end
-      color(0x0A1218, failed and RED or GREEN); gpu.set(2, H - 2, unicode.sub(message ~= "" and message or "Open-Meteo | live weather refreshes every 60 seconds", 1, math.max(1, W - 4)))
-      color(GRAY, BLACK); gpu.fill(1, H, W, 1, " "); gpu.set(2, H, "S: SEARCH LOCATION  |  R: REFRESH  |  Q: CLOSE")
+      put(2, H - 2, message ~= "" and message or "Open-Meteo weather | TimeAPI timezone clock", failed and RED or GREEN, 0x0A1218, W - 4)
+      color(GRAY, BLACK); gpu.fill(1, H, W, 1, " "); gpu.set(2, H, "S / TAP LOCATION: SEARCH   R: REFRESH   Q: CLOSE")
     end
     refresh(); draw(); local nextRefresh = computer.uptime() + 60
     while true do
-      local e, _, ch, code = pull(0.5)
+      local e, _, ch, code = pull(0.2)
       if e == "key_down" then
-        if ch == 113 or ch == 81 or ch == 27 or code == 1 then cls(); return
+        if searching then
+          if ch == 27 or code == 1 then searching, query, suggestions, searchDeadline = false, "", {}, nil; failed = false; draw()
+          elseif ch == 13 then if suggestions[highlighted] then selectLocation(suggestions[highlighted]); refresh(); nextRefresh = computer.uptime() + 60 end; draw()
+          elseif code == 200 then highlighted = math.max(1, highlighted - 1); draw()
+          elseif code == 208 then highlighted = math.min(#suggestions, highlighted + 1); draw()
+          elseif code == 14 or ch == 8 then query = unicode.sub(query, 1, math.max(0, unicode.len(query) - 1)); suggestions = {}; failed = false; searchDeadline = computer.uptime() + 0.45; draw()
+          elseif ch and ch >= 32 and unicode.len(query) < 60 then local ok, char = pcall(unicode.char, ch); if ok and char then query = query .. char; suggestions = {}; failed = false; searchDeadline = computer.uptime() + 0.45; draw() end end
+        elseif ch == 113 or ch == 81 or ch == 27 or code == 1 then cls(); return
         elseif ch == 114 or ch == 82 then refresh(); nextRefresh = computer.uptime() + 60; draw()
-        elseif ch == 115 or ch == 83 then lookup(false); if not failed then refresh() end; nextRefresh = computer.uptime() + 60; draw() end
+        elseif ch == 115 or ch == 83 then searching, query, suggestions, highlighted = true, "", {}, 1; failed = false; draw() end
+      elseif e == "touch" and not searching and code == 4 then
+        searching, query, suggestions, highlighted = true, "", {}, 1; failed = false; draw()
+      elseif e == "touch" and searching and code >= 7 and code <= 7 + math.min(#suggestions, math.max(1, H - 9)) - 1 then
+        local chosen = suggestions[code - 7 + 1]
+        if chosen then selectLocation(chosen); refresh(); nextRefresh = computer.uptime() + 60; draw() end
       end
+      if searching and searchDeadline and computer.uptime() >= searchDeadline then updateSuggestions(); draw() end
       if computer.uptime() >= nextRefresh then refresh(); nextRefresh = computer.uptime() + 60; draw() end
     end
   end
