@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v4.0  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v4.1  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v4.0"
+local VERSION = "ReactOS-OC v4.1"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -5037,11 +5037,12 @@ do
   -- Waits for the next click or key press.
   --   touch -> "touch", x, y
   --   key   -> "key", char, code
-  local function waitInput()
+  local function waitInput(timeout)
     while true do
-      local e, _, p1, p2 = pull()
+      local e, _, p1, p2 = pull(timeout)
       if e == "touch" then return "touch", p1, p2
-      elseif e == "key_down" then return "key", p1, p2 end
+      elseif e == "key_down" then return "key", p1, p2
+      elseif timeout then return "timeout" end
     end
   end
 
@@ -7592,6 +7593,39 @@ end
     end
   end
 
+  local sharedInternetClock
+  local function syncInternetClock()
+    local zone = cfg.weatherTZ or "Europe/Istanbul"
+    local started = computer.uptime()
+    local body = httpGet("https://timeapi.io/api/Time/current/zone?timeZone=" .. (tostring(zone):gsub("[^%w%-_%.~/]", function(c) return string.format("%%%02X", c:byte()) end)))
+    local finished = computer.uptime()
+    if not body then return false end
+    local function number(key) return tonumber(body:match('"' .. key .. '"%s*:%s*(-?[%d%.]+)')) end
+    local clock = { year=number("year"), month=number("month"), day=number("day"), hour=number("hour"), minute=number("minute"), second=number("seconds"), zone=body:match('"timeZone"%s*:%s*"([^"\\]*)"'), uptime=(started + finished) / 2 }
+    if not (clock.year and clock.month and clock.day and clock.hour and clock.minute and clock.second) then return false end
+    sharedInternetClock = clock
+    return true
+  end
+  local function internetClockText()
+    local anchor = sharedInternetClock
+    if not anchor then return nil end
+    local elapsed = math.max(0, math.floor(computer.uptime() - anchor.uptime))
+    local seconds = anchor.hour * 3600 + anchor.minute * 60 + anchor.second + elapsed
+    local days = math.floor(seconds / 86400); seconds = seconds % 86400
+    local hour, minute, second = math.floor(seconds / 3600), math.floor((seconds % 3600) / 60), seconds % 60
+    local year, month, day = anchor.year, anchor.month, anchor.day
+    local function daysInMonth(y, m)
+      if m == 2 then return (y % 4 == 0 and (y % 100 ~= 0 or y % 400 == 0)) and 29 or 28 end
+      return (m == 4 or m == 6 or m == 9 or m == 11) and 30 or 31
+    end
+    while days > 0 do
+      day = day + 1
+      if day > daysInMonth(year, month) then day = 1; month = month + 1; if month > 12 then month = 1; year = year + 1 end end
+      days = days - 1
+    end
+    return string.format("%02d:%02d:%02d", hour, minute, second), string.format("%04d-%02d-%02d", year, month, day), anchor.zone or ""
+  end
+
   local function weatherTimeApp()
     local location, weather, message, failed = nil, nil, "", false
     local searching, query, suggestions, highlighted, searchDeadline = false, "", {}, 1, nil
@@ -7677,29 +7711,12 @@ end
         }
         if values.year and values.month and values.day and values.hour and values.minute and values.second then
           timeAnchor, timeAnchorUptime, timeZoneLabel = values, (timeRequestStart + timeRequestEnd) / 2, zone or location.timezone
+          sharedInternetClock = { year=values.year, month=values.month, day=values.day, hour=values.hour, minute=values.minute, second=values.second, uptime=timeAnchorUptime, zone=timeZoneLabel }
         end
       end
       message, failed = "Updated live weather and timezone clock", false
     end
     local descriptions = { [0]="CLEAR SKY", [1]="MAINLY CLEAR", [2]="PARTLY CLOUDY", [3]="OVERCAST", [45]="FOG", [48]="RIME FOG", [51]="LIGHT DRIZZLE", [53]="DRIZZLE", [55]="HEAVY DRIZZLE", [61]="LIGHT RAIN", [63]="RAIN", [65]="HEAVY RAIN", [71]="LIGHT SNOW", [73]="SNOW", [75]="HEAVY SNOW", [80]="RAIN SHOWERS", [81]="SHOWERS", [82]="HEAVY SHOWERS", [95]="THUNDERSTORM", [96]="THUNDERSTORM / HAIL", [99]="SEVERE THUNDERSTORM" }
-    local function localClock()
-      if not timeAnchor then return "--:--:--", "Waiting for time service" end
-      local elapsed = math.max(0, math.floor(computer.uptime() - timeAnchorUptime))
-      local values = { year=timeAnchor.year, month=timeAnchor.month, day=timeAnchor.day }
-      local daySeconds = timeAnchor.hour * 3600 + timeAnchor.minute * 60 + timeAnchor.second + elapsed
-      local extraDays = math.floor(daySeconds / 86400); daySeconds = daySeconds % 86400
-      values.hour = math.floor(daySeconds / 3600); values.minute = math.floor((daySeconds % 3600) / 60); values.second = daySeconds % 60
-      local function monthDays(y, m)
-        if m == 2 then return (y % 4 == 0 and (y % 100 ~= 0 or y % 400 == 0)) and 29 or 28 end
-        return (m == 4 or m == 6 or m == 9 or m == 11) and 30 or 31
-      end
-      while extraDays > 0 do
-        values.day = values.day + 1
-        if values.day > monthDays(values.year, values.month) then values.day = 1; values.month = values.month + 1; if values.month > 12 then values.month = 1; values.year = values.year + 1 end end
-        extraDays = extraDays - 1
-      end
-      return string.format("%02d:%02d:%02d", values.hour, values.minute, values.second), string.format("%04d-%02d-%02d", values.year, values.month, values.day)
-    end
     local function put(x, y, value, fg, bg, width)
       if y < 1 or y > H or x < 1 or x > W then return end
       local maxWidth = math.min(width or (W - x + 1), W - x + 1)
@@ -7731,9 +7748,10 @@ end
       local placeName = location and (location.name .. (location.admin ~= "" and (", " .. location.admin) or "") .. (location.country ~= "" and (", " .. location.country) or "")) or "MERSIN, MERSIN, TURKEY"
       put(2, 4, placeName, 0xAFC2CB, 0x0A1218, W - 4)
       color(0x14212B, 0x14212B); gpu.fill(2, 6, W - 3, 5, " ")
-      local clock, date = localClock()
+      local clock, date, clockZone = internetClockText()
+      clock, date = clock or os.date("%H:%M:%S"), date or os.date("%Y-%m-%d")
       local mid = math.max(4, math.floor(W * 0.48))
-      put(4, 7, "LOCAL TIME  " .. (timeZoneLabel or location and location.timezone or ""), 0x36D6D6, 0x14212B, math.max(1, mid - 5))
+      put(4, 7, "LOCAL TIME  " .. (clockZone or timeZoneLabel or location and location.timezone or ""), 0x36D6D6, 0x14212B, math.max(1, mid - 5))
       put(4, 8, clock, WHITE, 0x14212B, math.max(1, mid - 5))
       put(4, 9, date, 0xAFC2CB, 0x14212B, math.max(1, mid - 5))
       put(mid, 7, "CURRENT WEATHER", 0x36D6D6, 0x14212B, W - mid - 2)
@@ -7927,7 +7945,8 @@ end
       local clockX = math.max(taskLabelX + 1, W - 17)
       local taskTitle = (activeDesktopApp and activeDesktopApp ~= "ReactX") and ("ReactOS " .. activeDesktopApp) or "ReactOS"
       gpu.set(taskLabelX, taskTop + 1, unicode.sub(taskTitle, 1, math.max(1, clockX - taskLabelX - 1)))
-      gpu.set(clockX, taskTop + 1, os.date("%H:%M"))
+      local liveClock = internetClockText()
+      gpu.set(clockX, taskTop + 1, unicode.sub(liveClock or os.date("%H:%M:%S"), 1, math.min(8, W - clockX + 1)))
       color(BG, FG)
     end
     local function launch(app)
@@ -7956,9 +7975,11 @@ end
       elseif app == "shutdown" then computer.shutdown() end
     end
     activeDesktopApp = "Desktop"
+    syncInternetClock()
     draw()
+    local nextClockDraw, nextClockSync = computer.uptime() + 1, computer.uptime() + 60
     while not done do
-      local kind, a, b = waitInput()
+      local kind, a, b = waitInput(0.2)
       local app
       if kind == "touch" then
         if a >= startBtn[1] and a <= startBtn[3] and b >= startBtn[2] and b <= startBtn[4] then app = startMenu(); draw()
@@ -7976,6 +7997,11 @@ end
         end
       end
       if app then launch(app); if not done then draw() end end
+      if not done and computer.uptime() >= nextClockSync then
+        syncInternetClock(); nextClockSync = computer.uptime() + 60; draw(); nextClockDraw = computer.uptime() + 1
+      elseif not done and computer.uptime() >= nextClockDraw then
+        draw(); nextClockDraw = computer.uptime() + 1
+      end
     end
     activeDesktopApp = nil
     cls()
