@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v4.6  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v4.7  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v4.6"
+local VERSION = "ReactOS-OC v4.7"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -8015,6 +8015,7 @@ end
   end
 
   local EMFIND_SOURCE = [====[
+-- ReactOS Emission Finder v4.7
 local CFG = {
   acc          = { LOW = 10000, MEDIUM = 2500, HIGH = 500 },
   wantTypes    = { MEDIUM = true, HIGH = true },
@@ -8075,6 +8076,8 @@ local ROLE_SHORT = { wide = "WB", narrow = "NB", spy = "Spy" }
 local ROLES = { "wide", "narrow", "spy" }
 
 local sys = {}
+local demoMode, demoReason = false, ""
+local demoNextSample, demoNextMaintain, demoCounter = 0, 0, 0
 local args = { ... }
 do
   local okC, computer = pcall(require, "computer")
@@ -8198,19 +8201,22 @@ local function log(fmt, ...)
   local line = string.format("[%s] %s", date("%H:%M:%S"), s)
   recent[#recent + 1] = line
   if #recent > 40 then table.remove(recent, 1) end
-  local f = io.open(CFG.logFile, "a")
-  if f then
-    f:write(line, "\n")
-    local size = f:seek("end")
-    f:close()
-    if size and size > CFG.logMaxBytes then
-      os.remove(CFG.logFile .. ".old"); os.rename(CFG.logFile, CFG.logFile .. ".old")
+  if not demoMode then
+    local f = io.open(CFG.logFile, "a")
+    if f then
+      f:write(line, "\n")
+      local size = f:seek("end")
+      f:close()
+      if size and size > CFG.logMaxBytes then
+        os.remove(CFG.logFile .. ".old"); os.rename(CFG.logFile, CFG.logFile .. ".old")
+      end
     end
   end
   if not sys.oc and os.getenv and os.getenv("EMFIND_VERBOSE") then print(line) end
 end
 
 local function journal(fmt, ...)
+  if demoMode then return end
   local f = io.open(CFG.journalFile, "a")
   if f then
     f:write(date("[%Y-%m-%d %H:%M] "), string.format(fmt, ...), "\n")
@@ -8697,6 +8703,7 @@ local function srcLabel(b)
   if nb > 0 then
     parts[#parts + 1] = (#b.sources == 0 and "nuclear blast" or "blast") .. (nb > 1 and ("×" .. nb) or "")
   end
+  if b.demo then parts[#parts + 1] = "SIMULATED" end
   return table.concat(parts, ", ")
 end
 
@@ -8808,12 +8815,14 @@ local function archiveBase(b, why)
 end
 
 local function saveData()
+  if demoMode then return end
   saveTable(CFG.dataFile, { nextBaseId = nextBaseId, bases = bases, archive = archive,
     marks = marks, nextMarkId = nextMarkId })
   dirty = false
 end
 
 local function saveAccum()
+  if demoMode then return end
   local list = {}
   for _, c in ipairs(clusters) do
     if c.state == "own" then
@@ -9129,6 +9138,65 @@ local function updateBases()
     end
     if not isBlast(b) and age > CFG.archiveAfter then archiveBase(b, "silent for " .. round(age / 3600) .. " h") end
   end
+end
+
+local function seedDemoData()
+  local t = now()
+  bases = {
+    { id = 1, sources = {
+      { t = "NEUTRON_EMISSION", x = 128, z = -64, first = t, last = t },
+      { t = "RADIO_WAVES", x = 136, z = -58, first = t, last = t },
+    }, players = {}, foundAt = t, demo = true },
+    { id = 2, sources = {
+      { t = "ARC_FLASH", x = -384, z = 256, first = t, last = t },
+      { t = "NEUTRON_EMISSION", x = -378, z = 260, first = t, last = t },
+    }, players = {}, foundAt = t, demo = true },
+  }
+  archive, marks = {}, {}
+  nextBaseId, nextMarkId = 3, 1
+  for _, b in ipairs(bases) do baseCenter(b) end
+  indexBases()
+
+  for i = 1, 24 do
+    if i <= 14 then
+      addSample("MEDIUM", 128 + ((i * 173) % 901) - 450,
+        -64 + ((i * 311) % 901) - 450, t - (24 - i) * 2)
+    else
+      local n = i - 14
+      addSample("HIGH", -384 + ((n * 71) % 241) - 120,
+        256 + ((n * 127) % 241) - 120, t - (24 - i) * 2)
+    end
+  end
+  maintain()
+  stats.surveys = 1
+  demoCounter = 24
+  demoNextSample = sys.uptime() + 1
+  demoNextMaintain = sys.uptime() + 5
+  dirty = false
+end
+
+local function demoStep()
+  local t = now()
+  for _, b in ipairs(bases) do
+    for _, s in ipairs(b.sources) do s.last = t end
+  end
+  if sys.uptime() < demoNextSample then return end
+  demoCounter = demoCounter + 1
+  local i = demoCounter
+  if i % 2 == 0 then
+    addSample("MEDIUM", 128 + ((i * 173) % 901) - 450,
+      -64 + ((i * 311) % 901) - 450, t)
+  else
+    local n = math.floor(i / 2) + 1
+    addSample("HIGH", -384 + ((n * 71) % 241) - 120,
+      256 + ((n * 127) % 241) - 120, t)
+  end
+  stats.surveys = stats.surveys + 1
+  if sys.uptime() >= demoNextMaintain then
+    maintain(); updateBases()
+    demoNextMaintain = sys.uptime() + 5
+  end
+  demoNextSample = sys.uptime() + 1
 end
 
 local function pickRecheck()
@@ -9867,7 +9935,7 @@ local function tabSearch(t)
   local b0 = ui.searchRegion("objects", by, bf, m, #bases)
   ui.page[1] = ui.search[ui.searchFocus].shown
 
-  redbar(x, y, L.mw, "DETECTION ACCUMULATION")
+  redbar(x, y, L.mw, demoMode and "DEMO MODE · SIMULATED DATA" or "DETECTION ACCUMULATION")
   put(x, y + 2, string.format("CLUSTERS %02d · OWN SOURCES %02d", #acc, own), C.gray)
   local rows = {}
   for i = a0 + 1, a0 + k do
@@ -10088,12 +10156,18 @@ local function tabSettings(t)
   btn(x + w - 24, y, 24, 3, "U  CHECK LINK", "refresh", "red")
   y = y + 4
   local auto = ""
-  for _, r in ipairs(ROLES) do
-    if S.freq[r] and not SAT.ok[r] then auto = " · AUTO RETRY EVERY " .. (ready() and "5 MIN" or "30 S") break end
+  if not demoMode then
+    for _, r in ipairs(ROLES) do
+      if S.freq[r] and not SAT.ok[r] then auto = " · AUTO RETRY EVERY " .. (ready() and "5 MIN" or "30 S") break end
+    end
   end
-  if y <= L.bodyEnd then put(x, y, "LINK CHECKED " .. upper(ago(sys.uptime() - lastMap)) .. " AGO" .. auto, C.gray) end
+  if y <= L.bodyEnd then
+    put(x, y, demoMode and ("DEMO MODE · " .. demoReason) or
+      ("LINK CHECKED " .. upper(ago(sys.uptime() - lastMap)) .. " AGO" .. auto), demoMode and C.yel or C.gray)
+  end
   if y + 1 <= L.bodyEnd then
-    put(x, y + 1, "Frequencies may be set in advance. Once satellites are deployed, select CHECK LINK.", C.dgray)
+    put(x, y + 1, demoMode and "All readings are simulated. Restart Finder after both detector links are ready." or
+      "Frequencies may be set in advance. Once satellites are deployed, select CHECK LINK.", C.dgray)
   end
   if not sys.oc and y + 4 <= L.bodyEnd then put(x, y + 4, "(simulator mode)", C.dgray) end
 end
@@ -10242,7 +10316,12 @@ local function refreshSats(manual)
     end
     if S.freq[r] then parts[#parts + 1] = ROLE_SHORT[r] .. ": " .. (SAT.ok[r] and "OK" or tostring(SAT.status[r])) end
   end
-  if manual then message(#parts > 0 and table.concat(parts, " · ") or "frequencies not set") end
+  if manual then
+    if demoMode then
+      message(ready() and "Both links ready · close and reopen Finder for live scanning" or
+        "DEMO MODE · " .. demoReason)
+    else message(#parts > 0 and table.concat(parts, " · ") or "frequencies not set") end
+  end
 end
 
 local function openDialog(field)
@@ -10451,6 +10530,7 @@ tick = function()
 end
 
 local function autoRefresh()
+  if demoMode then return end
   for _, r in ipairs(ROLES) do
     if S.freq[r] and not SAT.ok[r] then
       if sys.uptime() - lastMap > (ready() and 300 or 30) then refreshSats(false) end
@@ -10465,28 +10545,48 @@ local function runSearch()
   screen(true)
   sys.sleep(0.05)
   if not running then return end
-  diagnosticStage = "Loading saved finder data"
-  phase = diagnosticStage .. "..."
-  screen(true)
-  loadData()
-  loadAccum()
-  if not running then return end
-  diagnosticStage = "Rebuilding saved search data"
-  phase = diagnosticStage .. "..."
-  screen(true)
-  maintain()
   diagnosticStage = "Checking NTM satellite links"
   phase = diagnosticStage .. "..."
   screen(true)
   SAT.map(); lastMap = sys.uptime()
+  if not ready() then
+    local missing = {}
+    for _, r in ipairs({ "wide", "narrow" }) do
+      if not SAT.ok[r] then
+        missing[#missing + 1] = ROLE_SHORT[r] .. " " .. tostring(SAT.status[r] or "satellite unavailable")
+      end
+    end
+    demoMode = true
+    demoReason = table.concat(missing, " · ")
+    phase = "DEMO MODE · SIMULATED DATA ONLY"
+    diagnosticStage = "Starting demo mode — required satellite links are missing"
+    ui.tab = 1
+    seedDemoData()
+  else
+    diagnosticStage = "Loading saved finder data"
+    phase = diagnosticStage .. "..."
+    screen(true)
+    loadData()
+    loadAccum()
+    if not running then return end
+    diagnosticStage = "Rebuilding saved search data"
+    phase = diagnosticStage .. "..."
+    screen(true)
+    maintain()
+  end
   log("start: WB — %s; NB — %s; spy — %s", tostring(SAT.status.wide),
     tostring(SAT.status.narrow), tostring(SAT.status.spy))
-  if not ready() then ui.tab = 5 end
+  if not ready() and not demoMode then ui.tab = 5 end
   local lastMaint, lastSave, lastSync = sys.uptime(), sys.uptime(), sys.uptime()
   while running do
     tick()
     autoRefresh()
-    if not ready() then
+    if demoMode then
+      diagnosticStage = "Running simulated readings — no satellite scan"
+      phase = "DEMO MODE · SIMULATED DATA ONLY"
+      demoStep()
+      sys.sleep(0.5)
+    elseif not ready() then
       diagnosticStage = "Waiting for configured WB and NB satellite links"
       phase = diagnosticStage
       sys.sleep(0.5)
@@ -10524,8 +10624,10 @@ local function runSearch()
       sys.sleep(((not evs or #evs == 0) and CFG.wideGap or 0) + math.random() * CFG.jitter)
     end
   end
-  saveData()
-  saveAccum()
+  if not demoMode then
+    saveData()
+    saveAccum()
+  end
 end
 
 local function runProbe(X, Z)
