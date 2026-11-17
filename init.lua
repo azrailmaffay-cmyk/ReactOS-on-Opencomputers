@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v4.3  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v4.4  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v4.3"
+local VERSION = "ReactOS-OC v4.4"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -1135,16 +1135,46 @@ for n in ("string table math coroutine"):gmatch("%a+") do
 end
 
 SHIMS.event = function()
-  local ev = {}
+  local ev, listeners = {}, {}
+  ev.listen = function(name, callback)
+    if type(name) ~= "string" or type(callback) ~= "function" then return nil end
+    local list = listeners[name] or {}
+    listeners[name] = list
+    for _, existing in ipairs(list) do if existing == callback then return true end end
+    list[#list + 1] = callback
+    return true
+  end
+  ev.ignore = function(name, callback)
+    local list = listeners[name]
+    if not list then return false end
+    for i = #list, 1, -1 do
+      if list[i] == callback then table.remove(list, i); return true end
+    end
+    return false
+  end
   ev.pull = function(a1, a2)
     local timeout, name
     if type(a1) == "number" then timeout, name = a1, a2 else name = a1 end
-    local dl = timeout and (computer.uptime() + timeout) or nil
+    local dl = timeout and (computer.uptime() + math.max(0, timeout)) or nil
     while true do
       local left = dl and math.max(0, dl - computer.uptime()) or nil
-      local e, a, b, c, d = pull(left)
-      if e == "key_down" and b == 3 then error("__ctrlc__", 0) end
-      if e and (not name or e == name) then return e, a, b, c, d end
+      local signal = { n = 0 }
+      local function capture(...)
+        signal.n = select("#", ...)
+        for i = 1, signal.n do signal[i] = select(i, ...) end
+      end
+      capture(pull(left))
+      local e = signal[1]
+      if e then
+        local registered = listeners[e]
+        if registered then
+          local callbacks = {}
+          for i, callback in ipairs(registered) do callbacks[i] = callback end
+          for _, callback in ipairs(callbacks) do pcall(callback, unpackValues(signal, 1, signal.n)) end
+        end
+      end
+      if e == "key_down" and signal[3] == 3 then error("__ctrlc__", 0) end
+      if e and (not name or e == name) then return unpackValues(signal, 1, signal.n) end
       if dl and computer.uptime() >= dl then return nil end
     end
   end
@@ -1267,6 +1297,21 @@ progEnv = function()
   }, { __index = _ENV.io })
   env.io.stdout = { write = function(self, ...) wr(...); return self end, flush = function() end, close = function() end }
   env.io.stderr = env.io.stdout
+  env.os.remove = function(path)
+    local address, resolved = resolve(tostring(path))
+    if not address then return nil, resolved end
+    return fsRemove(address, resolved)
+  end
+  env.os.rename = function(from, to)
+    local sourceAddress, sourcePath = resolve(tostring(from))
+    if not sourceAddress then return nil, sourcePath end
+    local targetAddress, targetPath = resolve(tostring(to))
+    if not targetAddress then return nil, targetPath end
+    if sourceAddress ~= targetAddress then return nil, "cross-drive rename is not supported" end
+    local ok, renamed = inv(sourceAddress, "rename", sourcePath, targetPath)
+    if not ok or not renamed then return nil, tostring(ok and "rename failed" or renamed) end
+    return true
+  end
   return setmetatable(env, { __index = _ENV })
 end
 
@@ -7896,6 +7941,7 @@ end
       { name = "RBMK Console", box = 0x802020, glyph = "RBMK", fg = 0xFFFFFF, app = "rbmk" },
       { name = "Fusion Monitor", box = 0x205868, glyph = "FUSION", fg = 0xFFFFFF, app = "fusion" },
       { name = "ICF Control", box = 0x905030, glyph = "ICF", fg = 0xFFFFFF, app = "icf" },
+      { name = "Emission Finder", box = 0x704080, glyph = "EMF", fg = 0xFFFFFF, app = "emfind" },
       { name = "Weather & Time", box = 0x207080, glyph = "WX", fg = 0xFFFFFF, app = "weather" },
       { name = "ReactX", box = 0x203878, glyph = "DX", fg = 0xFFFFFF, app = "reactx" },
       { name = "ReactSLI", box = 0x604080, glyph = "SLI", fg = 0xFFFFFF, app = "reactsli" },
@@ -7923,7 +7969,7 @@ end
     local items = {
       { label = "ME Storage", app = "me" }, { label = "RBMK Console", app = "rbmk" },
       { label = "Fusion Monitor", app = "fusion" },
-      { label = "ICF Control", app = "icf" },
+      { label = "ICF Control", app = "icf" }, { label = "Emission Finder", app = "emfind" },
       { label = "Weather & Time", app = "weather" },
       { label = "ReactX", app = "reactx" }, { label = "ReactSLI", app = "reactsli" },
       { label = "Settings", app = "settings" }, { label = "Notepad", app = "notepad" },
@@ -7996,12 +8042,2570 @@ end
     end
   end
 
+  local EMFIND_SOURCE = [====[
+local CFG = {
+  acc          = { LOW = 10000, MEDIUM = 2500, HIGH = 500 },
+  wantTypes    = { MEDIUM = true, HIGH = true },
+  dedupTTL     = { LOW = 16, MEDIUM = 1, HIGH = 61 },
+  minSamples   = 12,
+  checkSE      = 200,
+  lockMin      = 4,
+  mergeK       = 2.5,
+  splitK       = 1.5,
+  splitMin     = 12,
+  maxMisses    = 3,
+  lostRetry    = 1800,
+  sampleTTL    = 3600,
+  wideGap      = 0.2,
+  jitter       = 0.5,
+  narrowDwell  = 20,
+  narrowDwellRing = 10,
+  narrowGap    = 0.25,
+  hexStep      = 430,
+  hexRings     = 1,
+  hexRingsMax  = 2,
+  baseMergeR   = 100,
+  blastNear    = 600,
+  blastRings   = 3,
+  staleAfter   = 900,
+  recheckEvery = 1800,
+  archiveAfter = 12 * 3600,
+  archiveMax   = 100,
+  spyEvery     = 60,
+  spyPerBase   = 600,
+  screenEvery  = 1,
+  saveEvery    = 30,
+  markEvery    = 900,
+  markMax      = 50,
+  maxPts       = 400,
+  maxPlayers   = 30,
+  maxBlasts    = 20,
+  rebootAfter  = 0, -- A desktop app must never reboot the whole computer automatically.
+
+  cfgFile      = "/Users/emfind.cfg",
+  dataFile     = "/Users/emfind_bases.dat",
+  logFile      = "/Users/emfind.log",
+  journalFile  = "/Users/emfind_found.txt",
+  accumFile    = "/Users/emfind_accum.dat",
+  logMaxBytes  = 64 * 1024,
+  utcOffset    = 3,
+}
+
+local TYPES = {
+  wide   = "UWB_EMISSION_DETECTOR",
+  narrow = "NB_RAY_SCANNER",
+  spy    = "NOT_A_SPY_SATELLITE_:)",
+}
+local ROLE_NAME = { wide = "Wideband emission detector",
+                    narrow = "Narrowband emission detector", spy = "Spy satellite" }
+local ROLE_SHORT = { wide = "WB", narrow = "NB", spy = "Spy" }
+local ROLES = { "wide", "narrow", "spy" }
+
+local sys = {}
+local args = { ... }
+do
+  local okC, computer = pcall(require, "computer")
+  local okE, event    = pcall(require, "event")
+  sys.oc = okC and okE and not (os.getenv and os.getenv("EMFIND_SIM"))
+  if okC and okE then
+    sys.event = event
+    sys.uptime = computer.uptime
+    sys.sleep  = os.sleep
+  else
+    local t = tonumber(os.getenv and os.getenv("EMFIND_T0")) or 0
+    local limit = t + (tonumber(os.getenv and os.getenv("EMFIND_T")) or 1800)
+    sys.uptime = function() return t end
+    sys.sleep  = function(s) t = t + (s or 0) end
+    sys.limit  = limit
+  end
+  sys.hasOC = okC and okE
+end
+
+local clockOffset = 0
+local function syncClock()
+  local okF, fs = pcall(require, "filesystem")
+  if sys.hasOC and okF then
+    local p = "/Users/.emfind_clock"
+    local f = io.open(p, "w")
+    if f then f:write("t"); f:close() end
+    local ok, ms = pcall(fs.lastModified, p)
+    if ok and type(ms) == "number" and ms > 1e12 then clockOffset = ms / 1000 - sys.uptime() end
+  end
+end
+syncClock()
+local function now() return sys.uptime() + clockOffset end
+local startedAt = sys.uptime()
+local rebootNow = false
+
+local function date(fmt)
+  if clockOffset > 0 then return os.date("!" .. fmt, math.floor(now()) + CFG.utcOffset * 3600) end
+  return os.date(fmt)
+end
+
+if not sys.oc then
+  local dir = (os.getenv and os.getenv("EMFIND_DIR")) or "."
+  for _, k in ipairs({ "cfgFile", "dataFile", "logFile", "journalFile", "accumFile" }) do
+    CFG[k] = dir .. "/" .. CFG[k]:match("[^/]+$")
+  end
+  for k, v in ((os.getenv and os.getenv("EMFIND_CFG")) or ""):gmatch("(%w+)=([%d%.]+)") do
+    CFG[k] = tonumber(v)
+  end
+end
+
+local function round(v) return math.floor(v + 0.5) end
+
+local function serWrite(f, v)
+  local t = type(v)
+  if t == "table" then
+    f:write("{")
+    local n = #v
+    for i = 1, n do serWrite(f, v[i]); f:write(",") end
+    for k, x in pairs(v) do
+      local tk = type(k)
+      if not (tk == "number" and k >= 1 and k <= n and k % 1 == 0) then
+        if tk == "string" and k:match("^[%a_][%w_]*$") then f:write(k, "=")
+        elseif tk == "string" then f:write("[", string.format("%q", k), "]=")
+        elseif tk == "number" then f:write("[", string.format("%.17g", k), "]=")
+        else goto skip end
+        serWrite(f, x); f:write(",")
+      end
+      ::skip::
+    end
+    f:write("}")
+  elseif t == "string" then f:write(string.format("%q", v))
+  elseif t == "number" then
+    if v ~= v or v == math.huge or v == -math.huge then f:write("0")
+    elseif v % 1 == 0 and math.abs(v) < 2 ^ 53 then f:write(string.format("%d", v))
+    else f:write(string.format("%.2f", v)) end
+  elseif t == "boolean" then f:write(tostring(v))
+  else f:write("nil") end
+end
+
+local function loadTable(path)
+  local f = io.open(path, "r")
+  if not f then return nil end
+  local raw = f:read("*a"); f:close()
+  local fn = load("return " .. raw, "=" .. path, "t", {})
+  if not fn then return nil end
+  local ok, t = pcall(fn)
+  if ok and type(t) == "table" then return t end
+end
+
+local function saveTable(path, t)
+  local tmp = path .. ".tmp"
+  local f = io.open(tmp, "w")
+  if not f then return false end
+  local ok = pcall(serWrite, f, t)
+  f:close()
+  if not ok then os.remove(tmp) return false end
+  os.remove(path)
+  return os.rename(tmp, path)
+end
+
+local S = { freq = {}, home = { x = 0, z = 0 }, radius = 0 }
+do
+  local t = loadTable(CFG.cfgFile)
+  if t then
+    S.freq = type(t.freq) == "table" and t.freq or {}
+    S.home = type(t.home) == "table" and t.home or S.home
+    S.radius = tonumber(t.radius) or 0
+  end
+end
+local function saveSettings() saveTable(CFG.cfgFile, S) end
+
+local function inTerritory(x, z, extra)
+  if S.radius <= 0 then return false end
+  local r = S.radius + (extra or 0)
+  return (x - S.home.x) ^ 2 + (z - S.home.z) ^ 2 <= r * r
+end
+
+local recent = {}
+local function log(fmt, ...)
+  local s = string.format(fmt, ...)
+  local line = string.format("[%s] %s", date("%H:%M:%S"), s)
+  recent[#recent + 1] = line
+  if #recent > 40 then table.remove(recent, 1) end
+  local f = io.open(CFG.logFile, "a")
+  if f then
+    f:write(line, "\n")
+    local size = f:seek("end")
+    f:close()
+    if size and size > CFG.logMaxBytes then
+      os.remove(CFG.logFile .. ".old"); os.rename(CFG.logFile, CFG.logFile .. ".old")
+    end
+  end
+  if not sys.oc and os.getenv and os.getenv("EMFIND_VERBOSE") then print(line) end
+end
+
+local function journal(fmt, ...)
+  local f = io.open(CFG.journalFile, "a")
+  if f then
+    f:write(date("[%Y-%m-%d %H:%M] "), string.format(fmt, ...), "\n")
+    local size = f:seek("end")
+    f:close()
+    if size and size > CFG.logMaxBytes then
+      os.remove(CFG.journalFile .. ".old"); os.rename(CFG.journalFile, CFG.journalFile .. ".old")
+    end
+  end
+end
+
+local SAT = { pool = {}, role = {}, tuned = {}, status = {}, ok = {} }
+local sim
+if not sys.oc then sim = require("emfind_sim"); sim.init(sys, S) end
+
+local serviceInput
+local function call(p, method, ...)
+  local err
+  for _ = 1, 3 do
+    local ok, r = pcall(p[method], ...)
+    if serviceInput then serviceInput() end
+    if ok then return true, r end
+    err = r
+    sys.sleep(0.05)
+  end
+  return false, err
+end
+
+function SAT.map()
+  SAT.role, SAT.tuned, SAT.ok = {}, {}, {}
+  local need = {}
+  for _, r in ipairs(ROLES) do
+    if S.freq[r] then need[#need + 1] = r else SAT.status[r] = "frequency not set" end
+  end
+  if sim then
+    for _, r in ipairs(need) do
+      local t = sim.typeAt(S.freq[r])
+      SAT.ok[r] = (t == TYPES[r])
+      SAT.status[r] = SAT.ok[r] and "OK (simulator)" or ((t == "" or t == nil) and "no satellite on this frequency" or ("wrong satellite: " .. tostring(t)))
+      SAT.role[r] = SAT.ok[r] and r or nil
+    end
+    return
+  end
+  local component = require("component")
+  SAT.pool = {}
+  local list = {}
+  for addr in component.list("ntm_satlink") do list[#list + 1] = addr end
+  table.sort(list)
+  for _, addr in ipairs(list) do
+    local p = component.proxy(addr)
+    local _, t = call(p, "getType")
+
+    if t ~= "LEO_RADAR" and t ~= "ORBITAL_TATOO_REMOVER" then SAT.pool[#SAT.pool + 1] = p end
+  end
+  local n = #SAT.pool
+  for i, r in ipairs(need) do
+    local p
+    if n >= #need then p = SAT.pool[i]
+    elseif n == 2 then p = (r == "wide") and SAT.pool[1] or SAT.pool[2]
+    elseif n == 1 then p = SAT.pool[1] end
+    if not p then
+      SAT.status[r] = "no ntm_satlink station"
+    else
+      call(p, "setFreq", tonumber(S.freq[r]))
+      SAT.tuned[p.address] = S.freq[r]
+      local _, t = call(p, "getType")
+      local _, con = call(p, "isConnected")
+      SAT.role[r] = p
+      if t == TYPES[r] then
+        SAT.ok[r] = true
+        SAT.status[r] = "OK, station " .. p.address:sub(1, 8) .. (con and "" or " (sky obstructed!)")
+      elseif t == "" or t == nil then
+        SAT.status[r] = "no satellite on this frequency"
+      else
+        SAT.status[r] = "wrong satellite: " .. tostring(t)
+      end
+    end
+  end
+end
+
+local function tune(r)
+  local p = SAT.role[r]
+  if not p or not SAT.ok[r] then return nil end
+  if sim then return p end
+  if SAT.tuned[p.address] ~= S.freq[r] then
+    call(p, "setFreq", tonumber(S.freq[r]))
+    SAT.tuned[p.address] = S.freq[r]
+  end
+  return p
+end
+
+local function satSend(r, cmd)
+  local p = tune(r)
+  if not p then return false end
+  if sim then sim.send(r, cmd) return true end
+  return (call(p, "send", cmd))
+end
+
+local function satQuery(r, cmd)
+  local p = tune(r)
+  if not p then return nil end
+  if sim then
+    sim.send(r, cmd)
+    local v = sim.read(r)
+    return (v ~= nil and v ~= "") and v or nil
+  end
+  if not call(p, "send", cmd) then return nil end
+  local ok, v = call(p, "read")
+  if ok and type(v) == "string" and v ~= "" then return v end
+end
+
+local function ready() return SAT.ok.wide and SAT.ok.narrow end
+
+local function parseXZ(s)
+  if not s then return nil end
+  local a, b = s:match("^%s*(%-?%d+)%s*;%s*(%-?%d+)%s*$")
+  if a then return tonumber(a), tonumber(b) end
+end
+
+local function readEvents(r, typeCmd, filter)
+  local n = tonumber(satQuery(r, "count"))
+  if not n then return nil end
+  local out = {}
+  for i = 1, n do
+    local ty = satQuery(r, typeCmd .. " " .. i)
+    if ty and (not filter or filter[ty]) then
+      local x, z = parseXZ(satQuery(r, "getposition " .. i))
+      if x then out[#out + 1] = { t = ty, x = x, z = z } end
+    end
+  end
+  return out
+end
+
+local clusters, nextId = {}, 1
+local seen = {}
+local stats = { surveys = 0, samples = 0, t0 = now() }
+local bases, archive = {}, {}
+local marks, nextMarkId = {}, 1
+local baseById = {}
+
+local function noiseSD(ty) return CFG.acc[ty] * 0.718 end
+
+local function axisLock(vals, mean, A)
+  local cnt = {}
+  for _, v in ipairs(vals) do cnt[v] = (cnt[v] or 0) + 1 end
+  local best, bd
+  for v in pairs(cnt) do
+    if cnt[v + 2 * A] then
+      local x0 = v + A
+      local d = math.abs(x0 - mean)
+      if d <= A and (not bd or d < bd) then best, bd = x0, d end
+    end
+  end
+  if best then return best end
+  local bestIn
+  for v, k in pairs(cnt) do
+    if k >= 3 then
+      for _, x0 in ipairs({ v - A, v + A }) do
+        local inl = 0
+        for _, u in ipairs(vals) do if math.abs(u - x0) <= A then inl = inl + 1 end end
+        local d = math.abs(x0 - mean)
+        if d <= A and (not bestIn or inl > bestIn or (inl == bestIn and d < bd)) then
+          best, bestIn, bd = x0, inl, d
+        end
+      end
+    end
+  end
+  return best
+end
+
+local function baseOfCluster(c) return c.baseId and baseById[c.baseId] end
+
+local function confirmPinned(c, p)
+  if not c.baseId or p.t <= (c.lastWide or 0) then return end
+  local r = CFG.acc[c.type] + 1
+  for _, o in ipairs(clusters) do
+    if o ~= c and o.pin and o.type == c.type and o.baseId ~= c.baseId
+      and math.abs(p.x - o.cx) <= r and math.abs(p.z - o.cz) <= r then return end
+  end
+  c.lastWide = p.t
+  if c.src and p.t > (c.src.last or 0) then c.src.last = p.t end
+  if c.wpin then c.wpin.last = p.t end
+end
+
+local function recompute(c)
+  if c.pin then
+
+    c.cx, c.cz, c.se = c.pin[1], c.pin[2], 0
+    for _, p in ipairs(c.pts) do confirmPinned(c, p) end
+    c.hits = (c.hits or 0) + #c.pts
+    c.pts, c.n = {}, 0
+    return
+  end
+  if #c.pts > CFG.maxPts then
+    table.sort(c.pts, function(a, b) return a.t < b.t end)
+    local keep = {}
+    for i = #c.pts - CFG.maxPts + 1, #c.pts do keep[#keep + 1] = c.pts[i] end
+    c.pts = keep
+  end
+  local n = #c.pts
+  c.n = n
+  if n == 0 then return end
+  local sx, sz = 0, 0
+  for _, p in ipairs(c.pts) do sx, sz = sx + p.x, sz + p.z end
+  local cx, cz = sx / n, sz / n
+  local vx, vz = 0, 0
+  for _, p in ipairs(c.pts) do vx, vz = vx + (p.x - cx) ^ 2, vz + (p.z - cz) ^ 2 end
+  local sd = n >= 2 and math.sqrt((vx + vz) / (2 * (n - 1))) or noiseSD(c.type)
+  if n < 5 then sd = math.max(sd, noiseSD(c.type)) end
+  local xs, zs = {}, {}
+  for i, p in ipairs(c.pts) do xs[i], zs[i] = p.x, p.z end
+  local A = CFG.acc[c.type]
+  c.lockX, c.lockZ = axisLock(xs, cx, A), axisLock(zs, cz, A)
+  local seAxis = sd / math.sqrt(n)
+  c.cx, c.cz, c.sd = c.lockX or cx, c.lockZ or cz, sd
+  c.se = math.sqrt((c.lockX and 0 or seAxis ^ 2) + (c.lockZ and 0 or seAxis ^ 2))
+  c.own = inTerritory(c.cx, c.cz, 2 * c.se)
+end
+
+local function newCluster(ty)
+  local c = { id = nextId, type = ty, pts = {}, state = "collect", misses = 0, needN = CFG.minSamples, n = 0 }
+  nextId = nextId + 1
+  clusters[#clusters + 1] = c
+  return c
+end
+
+local function removeCluster(c)
+  for i, x in ipairs(clusters) do if x == c then table.remove(clusters, i) return end end
+end
+
+local function pinCluster(c, x, z, state)
+  c.pin, c.state = { x, z }, state
+  recompute(c)
+end
+
+local function homeFor(ty, x, z, useGate)
+  local best, bd
+  local A = CFG.acc[ty] + 1
+  for _, c in ipairs(clusters) do
+    if c.type == ty and c.pin and math.abs(x - c.cx) <= A and math.abs(z - c.cz) <= A then
+      local d = (x - c.cx) ^ 2 + (z - c.cz) ^ 2
+      if not bd or d < bd then best, bd = c, d end
+    end
+  end
+  if best then return best end
+  for _, c in ipairs(clusters) do
+    if c.type == ty and not c.pin and c.n > 0 then
+      local d = (x - c.cx) ^ 2 + (z - c.cz) ^ 2
+      local gate = CFG.acc[ty] + 2 * c.se + 1
+      local inside = math.abs(x - c.cx) <= gate and math.abs(z - c.cz) <= gate
+      if (not useGate or inside) and (not bd or d < bd) then best, bd = c, d end
+    end
+  end
+  return best
+end
+
+local function addSample(ty, x, z, t)
+  local key = ty .. ":" .. x .. ";" .. z
+  if seen[key] and t - seen[key] < (CFG.dedupTTL[ty] or 1) then return end
+  seen[key] = t
+  stats.samples = stats.samples + 1
+  local c = homeFor(ty, x, z, true) or newCluster(ty)
+  c.pts[#c.pts + 1] = { x = x, z = z, t = t }
+  recompute(c)
+end
+
+local function farthest(pts, x, z)
+  local bp, bd = nil, -1
+  for _, p in ipairs(pts) do
+    local d = (p.x - x) ^ 2 + (p.z - z) ^ 2
+    if d > bd then bp, bd = p, d end
+  end
+  return bp
+end
+
+local function trySplit(c)
+  local nsd = noiseSD(c.type)
+  if c.pin or c.n < 2 * CFG.splitMin or c.sd < CFG.splitK * nsd then return false end
+  local a = farthest(c.pts, c.cx, c.cz)
+  local b = farthest(c.pts, a.x, a.z)
+  local ax, az, bx, bz = a.x, a.z, b.x, b.z
+  local ga, gb
+  for _ = 1, 10 do
+    ga, gb = {}, {}
+    for _, p in ipairs(c.pts) do
+      if (p.x - ax) ^ 2 + (p.z - az) ^ 2 <= (p.x - bx) ^ 2 + (p.z - bz) ^ 2
+        then ga[#ga + 1] = p else gb[#gb + 1] = p end
+    end
+    if #ga == 0 or #gb == 0 then return false end
+    local sx, sz = 0, 0
+    for _, p in ipairs(ga) do sx, sz = sx + p.x, sz + p.z end
+    ax, az = sx / #ga, sz / #ga
+    sx, sz = 0, 0
+    for _, p in ipairs(gb) do sx, sz = sx + p.x, sz + p.z end
+    bx, bz = sx / #gb, sz / #gb
+  end
+  if #ga < CFG.splitMin or #gb < CFG.splitMin then return false end
+  if math.sqrt((ax - bx) ^ 2 + (az - bz) ^ 2) < 2 * nsd then return false end
+  c.pts = ga
+  c.state, c.misses, c.needN = "collect", 0, CFG.minSamples
+  recompute(c)
+  local d = newCluster(c.type)
+  d.pts = gb
+  recompute(d)
+  return true
+end
+
+local function pinOwnLocked()
+  for _, c in ipairs(clusters) do
+    if not c.pin and c.lockX and c.lockZ and inTerritory(c.lockX, c.lockZ) then
+      pinCluster(c, c.lockX, c.lockZ, "own")
+    end
+  end
+end
+
+local function maintain()
+  local t = now()
+  for k, v in pairs(seen) do if t - v > 61 then seen[k] = nil end end
+  local all = {}
+  for _, c in ipairs(clusters) do
+    for _, p in ipairs(c.pts) do
+      if t - p.t <= CFG.sampleTTL then p.ty = c.type; all[#all + 1] = p end
+    end
+    c.pts = {}
+  end
+  local orphans = {}
+  for _, p in ipairs(all) do
+    local c = homeFor(p.ty, p.x, p.z, false)
+    if c then c.pts[#c.pts + 1] = p else orphans[#orphans + 1] = p end
+  end
+  for i = #clusters, 1, -1 do
+    local c = clusters[i]
+    recompute(c)
+    if c.n == 0 and not c.pin then table.remove(clusters, i) end
+  end
+  for _, p in ipairs(orphans) do
+    local c = homeFor(p.ty, p.x, p.z, true) or newCluster(p.ty)
+    c.pts[#c.pts + 1] = p
+    recompute(c)
+  end
+  for _, c in ipairs(clusters) do
+    if c.state == "lost" and t - (c.lostAt or t) > CFG.lostRetry then
+      c.state, c.misses, c.lostAt = "collect", 0, nil
+      c.needN = math.max(CFG.minSamples, c.n)
+    end
+  end
+  local merged = true
+  while merged do
+    merged = false
+    for i = 1, #clusters do
+      local a = clusters[i]
+      for j = i + 1, #clusters do
+        local b = clusters[j]
+        if a.type == b.type and not a.pin and not b.pin and a.n > 0 and b.n > 0 then
+          local d = math.sqrt((a.cx - b.cx) ^ 2 + (a.cz - b.cz) ^ 2)
+          if d < CFG.mergeK * math.sqrt(a.se ^ 2 + b.se ^ 2) then
+            local dst, src = a, b
+            if b.n > a.n then dst, src = b, a end
+            for _, p in ipairs(src.pts) do dst.pts[#dst.pts + 1] = p end
+            recompute(dst)
+            removeCluster(src)
+            merged = true
+            break
+          end
+        end
+      end
+      if merged then break end
+    end
+  end
+  for _, c in ipairs(clusters) do if trySplit(c) then break end end
+  pinOwnLocked()
+end
+
+local nextBaseId = 1
+local dirty = false
+local WIDE_KIND = { RADAR_WAVES = true, HIGH_ENERGY_PARTICLES = true }
+local SHORT = {
+  RADAR_WAVES = "radar", NEUTRON_EMISSION = "reactor", HIGH_ENERGY_PARTICLES = "particles",
+  RADIO_WAVES = "station", ARC_FLASH = "arc",
+}
+
+local function baseCenter(b)
+  local sx, sz = 0, 0
+  for _, s in ipairs(b.sources) do sx, sz = sx + s.x, sz + s.z end
+  if #b.sources > 0 then b.cx, b.cz = round(sx / #b.sources), round(sz / #b.sources) end
+end
+
+local function lastConfirm(b)
+  local l = b.foundAt or 0
+  for _, s in ipairs(b.sources) do if (s.last or 0) > l then l = s.last end end
+  if #b.sources == 0 then
+    for _, x in ipairs(b.blasts or {}) do if x.t > l then l = x.t end end
+  end
+  return l
+end
+
+local function isBlast(b) return #b.sources == 0 end
+local function lastBlast(b)
+  local l
+  for _, x in ipairs(b.blasts or {}) do if not l or x.t > l then l = x.t end end
+  return l
+end
+
+local function nearBase(list, x, z)
+  local R2 = CFG.baseMergeR ^ 2
+  for i, b in ipairs(list) do
+    for _, s in ipairs(b.sources) do
+      if (s.x - x) ^ 2 + (s.z - z) ^ 2 <= R2 then return b, i end
+    end
+  end
+end
+
+local function indexBases()
+  baseById = {}
+  for _, b in ipairs(bases) do baseById[b.id] = b end
+end
+
+local function pinSourcesOf(b)
+  for _, s in ipairs(b.sources) do
+    if WIDE_KIND[s.t] then
+      local has = false
+      for _, c in ipairs(clusters) do
+        if c.pin and c.src == s then has = true break end
+      end
+      if not has then
+
+        local c
+        for _, o in ipairs(clusters) do
+          if not o.pin and o.type == "MEDIUM" and o.cx
+            and math.abs(o.cx - s.x) <= 300 and math.abs(o.cz - s.z) <= 300 then c = o break end
+        end
+        c = c or newCluster("MEDIUM")
+        c.baseId, c.src = b.id, s
+        pinCluster(c, s.x, s.z, "found")
+      end
+    end
+  end
+end
+
+local function pinWpins(b)
+  for _, wp in ipairs(b.wpins or {}) do
+    local has = false
+    for _, c in ipairs(clusters) do if c.pin and c.wpin == wp then has = true break end end
+    if not has then
+      local ns, nd
+      for _, s in ipairs(b.sources) do
+        local d = (s.x - wp.x) ^ 2 + (s.z - wp.z) ^ 2
+        if not nd or d < nd then ns, nd = s, d end
+      end
+      local c = newCluster("MEDIUM")
+      c.baseId, c.src, c.wpin = b.id, ns, wp
+      pinCluster(c, wp.x, wp.z, "found")
+    end
+  end
+end
+
+local function unpinBase(b)
+  for i = #clusters, 1, -1 do
+    local c = clusters[i]
+    if c.baseId == b.id then table.remove(clusters, i) end
+  end
+end
+
+local function srcLabel(b)
+  local cnt, order = {}, {}
+  for _, s in ipairs(b.sources) do
+    local nm = SHORT[s.t] or s.t
+    if not cnt[nm] then cnt[nm] = 0; order[#order + 1] = nm end
+    cnt[nm] = cnt[nm] + 1
+  end
+  local parts = {}
+  for _, nm in ipairs(order) do parts[#parts + 1] = cnt[nm] > 1 and (nm .. "×" .. cnt[nm]) or nm end
+  local nw = #(b.wpins or {})
+  if nw > 0 then parts[#parts + 1] = "hidden emitter" .. (nw > 1 and ("×" .. nw) or "") end
+  local nb = #(b.blasts or {})
+  if nb > 0 then
+    parts[#parts + 1] = (#b.sources == 0 and "nuclear blast" or "blast") .. (nb > 1 and ("×" .. nb) or "")
+  end
+  return table.concat(parts, ", ")
+end
+
+local function attachSources(found, seed, cover)
+  local t = now()
+  local touched = {}
+  for _, e in ipairs(found) do
+    if not inTerritory(e.x, e.z) then
+      local b = nearBase(bases, e.x, e.z)
+      if not b then
+        local ab, ai = nearBase(archive, e.x, e.z)
+        if ab then
+          table.remove(archive, ai)
+          ab.archivedAt, ab.nextRecheck = nil, nil
+          bases[#bases + 1] = ab
+          b = ab
+          log("base %d;%d restored from archive", b.cx, b.cz)
+          journal("%d;%d — active again (from archive)", b.cx, b.cz)
+        elseif seed and #seed.sources == 0 then
+          b = seed
+          b.isNew = true
+        else
+          b = { id = nextBaseId, sources = {}, players = {}, foundAt = t }
+          nextBaseId = nextBaseId + 1
+          bases[#bases + 1] = b
+          b.isNew = true
+        end
+        indexBases()
+      end
+      local s
+      for _, o in ipairs(b.sources) do
+        if o.t == e.t and math.abs(o.x - e.x) <= 3 and math.abs(o.z - e.z) <= 3 then s = o break end
+      end
+
+      if not s and e.t == "RADAR_WAVES" and cover then
+        for _, o in ipairs(b.sources) do
+          if o.t == e.t and (o.x - cover[1]) ^ 2 + (o.z - cover[2]) ^ 2 <= 240 * 240 then
+            local seenOld = false
+            for _, f in ipairs(found) do
+              if f.t == o.t and math.abs(f.x - o.x) <= 3 and math.abs(f.z - o.z) <= 3 then seenOld = true break end
+            end
+            if not seenOld then s = o break end
+          end
+        end
+      end
+      if s then
+
+        if s.x ~= e.x or s.z ~= e.z then
+          log("%s moved %d;%d → %d;%d", SHORT[s.t] or s.t, s.x, s.z, e.x, e.z)
+          s.x, s.z = e.x, e.z
+          for _, c in ipairs(clusters) do
+            if c.pin and c.src == s then pinCluster(c, s.x, s.z, c.state) end
+          end
+        end
+        s.last = t
+      else b.sources[#b.sources + 1] = { t = e.t, x = e.x, z = e.z, first = t, last = t } end
+
+      for i = #bases, 1, -1 do
+        local o = bases[i]
+        if o ~= b and nearBase({ o }, e.x, e.z) then
+          for _, os_ in ipairs(o.sources) do b.sources[#b.sources + 1] = os_ end
+          for _, x in ipairs(o.blasts or {}) do b.blasts = b.blasts or {}; b.blasts[#b.blasts + 1] = x end
+          for _, x in ipairs(o.wpins or {}) do b.wpins = b.wpins or {}; b.wpins[#b.wpins + 1] = x end
+          for nm, tt in pairs(o.players or {}) do
+            if not b.players[nm] or b.players[nm] < tt then b.players[nm] = tt end
+          end
+          b.foundAt = math.min(b.foundAt or t, o.foundAt or t)
+          for _, c in ipairs(clusters) do if c.baseId == o.id then c.baseId = b.id end end
+          table.remove(bases, i)
+          indexBases()
+        end
+      end
+      baseCenter(b)
+      touched[b] = true
+      dirty = true
+    end
+  end
+  for b in pairs(touched) do
+    pinSourcesOf(b)
+    pinWpins(b)
+    if b.isNew then
+      b.isNew = nil
+      log("NEW base %d;%d: %s%s", b.cx, b.cz, srcLabel(b), b.blasts and " (detected by blast)" or "")
+      journal("%d;%d — detected: %s", b.cx, b.cz, srcLabel(b))
+      b.spyAt = 0
+    end
+  end
+  return touched
+end
+
+local function removeBase(b)
+  for i, o in ipairs(bases) do if o == b then table.remove(bases, i) break end end
+  unpinBase(b)
+  indexBases()
+  dirty = true
+end
+
+local function archiveBase(b, why)
+  for i, o in ipairs(bases) do if o == b then table.remove(bases, i) break end end
+  unpinBase(b)
+  b.archivedAt = now()
+  b.why = why
+  table.insert(archive, 1, b)
+  while #archive > CFG.archiveMax do table.remove(archive) end
+  indexBases()
+  dirty = true
+  log("%s %d;%d — archived (%s)", isBlast(b) and "blast" or "base", b.cx, b.cz, why)
+  journal("%d;%d — archived: %s", b.cx, b.cz, why)
+end
+
+local function saveData()
+  saveTable(CFG.dataFile, { nextBaseId = nextBaseId, bases = bases, archive = archive,
+    marks = marks, nextMarkId = nextMarkId })
+  dirty = false
+end
+
+local function saveAccum()
+  local list = {}
+  for _, c in ipairs(clusters) do
+    if c.state == "own" then
+      list[#list + 1] = { type = c.type, state = "own", pin = c.pin }
+    elseif not c.pin and c.n > 0 then
+      list[#list + 1] = { type = c.type, state = (c.state == "check") and "collect" or c.state,
+        misses = c.misses, needN = c.needN, lostAt = c.lostAt, pts = c.pts }
+    end
+  end
+  saveTable(CFG.accumFile, { clusters = list })
+end
+
+local function loadAccum()
+  local t = loadTable(CFG.accumFile)
+  os.remove(CFG.accumFile)
+  if not t or type(t.clusters) ~= "table" then return end
+  local n = 0
+  for _, o in ipairs(t.clusters) do
+    if CFG.acc[o.type] then
+      local c = newCluster(o.type)
+      if o.state == "own" and type(o.pin) == "table" then
+        pinCluster(c, o.pin[1], o.pin[2], "own")
+      else
+        c.state, c.misses, c.needN, c.lostAt = o.state or "collect", o.misses or 0, o.needN or CFG.minSamples, o.lostAt
+        for _, p in ipairs(o.pts or {}) do
+          if tonumber(p.x) and tonumber(p.z) and tonumber(p.t) then c.pts[#c.pts + 1] = { x = p.x, z = p.z, t = p.t } end
+        end
+        recompute(c)
+        n = n + #c.pts
+      end
+    end
+  end
+  if n > 0 then log("restored detections: %d", n) end
+end
+
+local function loadData()
+  local t = loadTable(CFG.dataFile)
+  if not t then return end
+  bases = type(t.bases) == "table" and t.bases or {}
+  archive = type(t.archive) == "table" and t.archive or {}
+  nextBaseId = tonumber(t.nextBaseId) or 1
+  marks = type(t.marks) == "table" and t.marks or {}
+  nextMarkId = tonumber(t.nextMarkId) or 1
+  for _, m in ipairs(marks) do
+    m.players = m.players or {}
+    nextMarkId = math.max(nextMarkId, (m.id or 0) + 1)
+  end
+  for _, b in ipairs(bases) do
+    b.players = b.players or {}
+    b.sources = b.sources or {}
+    nextBaseId = math.max(nextBaseId, b.id + 1)
+  end
+  for _, b in ipairs(archive) do nextBaseId = math.max(nextBaseId, b.id + 1) end
+  indexBases()
+  for _, b in ipairs(bases) do pinSourcesOf(b); pinWpins(b) end
+end
+
+local function applyTerritory()
+  for i = #clusters, 1, -1 do
+    local c = clusters[i]
+    if c.state == "own" and not inTerritory(c.cx, c.cz) then table.remove(clusters, i) end
+  end
+  for i = #bases, 1, -1 do
+    local b = bases[i]
+    if b.cx and inTerritory(b.cx, b.cz) then
+      unpinBase(b)
+      table.remove(bases, i)
+      log("object %d;%d inside own territory — removed", b.cx or 0, b.cz or 0)
+    end
+  end
+  indexBases()
+  for _, c in ipairs(clusters) do if not c.pin then recompute(c) end end
+  pinOwnLocked()
+  dirty = true
+end
+
+local tick
+local phase = "standby"
+local narrowInfo = nil
+local running = true
+
+local function onBlast(x, z, t)
+  local key = "HIGH:" .. x .. ";" .. z
+  if seen[key] and t - seen[key] < CFG.dedupTTL.HIGH then return end
+  seen[key] = t
+  local blast = { x = x, z = z, t = t }
+  local N = CFG.blastNear
+  for _, b in ipairs(bases) do
+    local pts = {}
+    for _, s in ipairs(b.sources) do pts[#pts + 1] = s end
+    for _, s in ipairs(b.blasts or {}) do pts[#pts + 1] = s end
+    for _, s in ipairs(pts) do
+      if math.abs(s.x - x) <= N and math.abs(s.z - z) <= N then
+        b.blasts = b.blasts or {}
+        b.blasts[#b.blasts + 1] = blast
+        while #b.blasts > CFG.maxBlasts do table.remove(b.blasts, 1) end
+        b.spyAt = 0
+        dirty = true
+        log("NUCLEAR BLAST ~%d;%d near %s %d;%d", x, z, isBlast(b) and "blast" or "base", b.cx, b.cz)
+        journal("NUCLEAR BLAST ~%d;%d (±500) near object %d;%d", x, z, b.cx, b.cz)
+        return
+      end
+    end
+  end
+  if inTerritory(x, z, CFG.acc.HIGH) then
+    log("NUCLEAR BLAST ~%d;%d INSIDE OWN TERRITORY", x, z)
+    journal("NUCLEAR BLAST ~%d;%d (±500) inside own territory", x, z)
+    return
+  end
+  local b = { id = nextBaseId, sources = {}, players = {}, blasts = { blast }, foundAt = t,
+              cx = x, cz = z, scan = "wait", spyAt = 0 }
+  nextBaseId = nextBaseId + 1
+  bases[#bases + 1] = b
+  indexBases()
+  dirty = true
+  log("NUCLEAR BLAST ~%d;%d (±500) — queued for narrowband site scan", x, z)
+  journal("~%d;%d — NUCLEAR BLAST (±500)", x, z)
+end
+
+local function wideStep()
+  local t = now()
+  if not satSend("wide", "survey") then return nil end
+  stats.surveys = stats.surveys + 1
+  local evs = readEvents("wide", "gettype", CFG.wantTypes)
+  for _, e in ipairs(evs or {}) do
+    if e.t == "HIGH" then onBlast(e.x, e.z, t) else addSample(e.t, e.x, e.z, t) end
+  end
+  return evs
+end
+
+local function hexPoints(cx, cz, rings)
+  local pts = { { cx, cz } }
+  local s, h = CFG.hexStep, math.sqrt(3) / 2
+  for ring = 1, rings do
+    for q = -ring, ring do
+      for r = -ring, ring do
+        if (math.abs(q) + math.abs(r) + math.abs(q + r)) / 2 == ring then
+          pts[#pts + 1] = { cx + s * (q + r / 2), cz + s * r * h }
+        end
+      end
+    end
+  end
+  return pts
+end
+
+local function scanNarrow(x, z, dwell)
+  x, z = round(x), round(z)
+  satSend("narrow", string.format("settarget %d %d", x, z))
+  local diag = { tries = 0, answered = 0 }
+  local found, keys, t0 = {}, {}, sys.uptime()
+  repeat
+    satSend("narrow", "survey")
+    local evs = readEvents("narrow", "getinfo", nil)
+    diag.tries = diag.tries + 1
+    if evs then diag.answered = diag.answered + 1 else evs = {} end
+    for _, e in ipairs(evs) do
+      local key = e.t .. e.x .. ";" .. e.z
+      if not keys[key] and not inTerritory(e.x, e.z) then
+        keys[key] = true
+        found[#found + 1] = e
+      end
+    end
+    if sys.uptime() - t0 < dwell then wideStep() end
+    if narrowInfo then
+      narrowInfo.left = math.max(0, round(dwell - (sys.uptime() - t0)))
+      narrowInfo.tries, narrowInfo.answered, narrowInfo.found = diag.tries, diag.answered, #found
+    end
+    tick()
+    if sys.uptime() - t0 < dwell then sys.sleep(CFG.narrowGap) end
+  until sys.uptime() - t0 >= dwell or not running
+  return found, diag
+end
+
+local function verify(c)
+  c.state = "check"
+  local rings = math.min(CFG.hexRings + c.misses, CFG.hexRingsMax)
+  local pts = hexPoints(c.cx, c.cz, rings)
+  log("checking cluster %d;%d%s, %d points", round(c.cx), round(c.cz),
+    (c.lockX and c.lockZ) and " (locked)" or "", #pts)
+  for i, p in ipairs(pts) do
+    if not running then c.state = "collect" narrowInfo = nil return end
+    narrowInfo = { kind = "cluster check", i = i, n = #pts, x = round(p[1]), z = round(p[2]),
+                   left = 0, tries = 0, answered = 0, found = 0 }
+    local found, diag = scanNarrow(p[1], p[2], i == 1 and CFG.narrowDwell or CFG.narrowDwellRing)
+    narrowInfo = nil
+    if diag.answered == 0 then
+      log("! narrowband emission detector not responding")
+      c.state, c.retryAt = "collect", now() + 60
+      return
+    end
+    if #found > 0 then
+      local touched = attachSources(found, nil, p)
+
+      local best, bd
+      for b in pairs(touched) do
+        for _, s in ipairs(b.sources) do
+          if WIDE_KIND[s.t] then
+            local d = (s.x - c.cx) ^ 2 + (s.z - c.cz) ^ 2
+            if not bd or d < bd then best, bd = { b = b, s = s }, d end
+          end
+        end
+      end
+      if best then
+
+        local dup
+        for _, o in ipairs(clusters) do if o ~= c and o.pin and o.src == best.s then dup = o end end
+        if dup then
+          for _, pt in ipairs(c.pts) do dup.pts[#dup.pts + 1] = pt end
+          removeCluster(c)
+          recompute(dup)
+        else
+          c.baseId, c.src = best.b.id, best.s
+          pinCluster(c, best.s.x, best.s.z, "found")
+        end
+      else
+
+        local nb, ns, nd
+        for b in pairs(touched) do
+          for _, s in ipairs(b.sources) do
+            local d = (s.x - c.cx) ^ 2 + (s.z - c.cz) ^ 2
+            if not nd or d < nd then nb, ns, nd = b, s, d end
+          end
+        end
+
+        if nb and c.lockX and c.lockZ then
+          local px, pz = round(c.cx), round(c.cz)
+          local dup
+          for _, o in ipairs(clusters) do
+            if o ~= c and o.pin and o.baseId == nb.id and math.abs(o.cx - px) <= 600 and math.abs(o.cz - pz) <= 600 then
+              dup = o break
+            end
+          end
+          if dup then
+            for _, pt in ipairs(c.pts) do dup.pts[#dup.pts + 1] = pt end
+            removeCluster(c)
+            recompute(dup)
+          else
+            nb.wpins = nb.wpins or {}
+            local wp = { x = px, z = pz, last = now() }
+            nb.wpins[#nb.wpins + 1] = wp
+            c.baseId, c.src, c.wpin = nb.id, ns, wp
+            pinCluster(c, px, pz, "found")
+            log("emitter at %d;%d not visible to NB — detections assigned to base %d;%d", px, pz, nb.cx, nb.cz)
+          end
+          dirty = true
+        else
+          c.state = "collect"; c.needN = c.n * 2; c.waitN = c.n * 2
+        end
+      end
+      return
+    end
+  end
+  c.misses = c.misses + 1
+  c.needN = c.n * 2
+  c.state = c.misses >= CFG.maxMisses and "lost" or "collect"
+  if c.state == "lost" then c.lostAt = now() end
+  log("cluster %d;%d: miss %d/%d", round(c.cx), round(c.cz), c.misses, CFG.maxMisses)
+  trySplit(c)
+end
+
+local function pickCandidate()
+  local best
+  local t = now()
+  for _, c in ipairs(clusters) do
+    local ready_ = (c.n >= c.needN and c.se <= CFG.checkSE)
+      or (c.lockX and c.lockZ and c.n >= math.max(c.waitN or 0, c.misses == 0 and CFG.lockMin or c.needN))
+    if c.state == "collect" and not c.pin and not c.own and ready_ and t >= (c.retryAt or 0) then
+      if not best or c.se < best.se then best = c end
+    end
+  end
+  return best
+end
+
+local function baseState(b, t)
+  local age = t - lastConfirm(b)
+  if age <= CFG.staleAfter then return "active", age end
+  return "quiet", age
+end
+
+local function expireWpins(t)
+  for _, b in ipairs(bases) do
+    if b.wpins then
+      for k = #b.wpins, 1, -1 do
+        local wp = b.wpins[k]
+        if t - (wp.last or t) > CFG.archiveAfter then
+          table.remove(b.wpins, k)
+          for i = #clusters, 1, -1 do if clusters[i].wpin == wp then table.remove(clusters, i) end end
+          log("hidden emitter at %d;%d inactive too long — forgotten", wp.x, wp.z)
+          dirty = true
+        end
+      end
+      if #b.wpins == 0 then b.wpins = nil end
+    end
+  end
+end
+
+local function updateBases()
+  local t = now()
+  expireWpins(t)
+  for i = #bases, 1, -1 do
+    local b = bases[i]
+    local st, age = baseState(b, t)
+    if isBlast(b) then
+      if age > CFG.archiveAfter then archiveBase(b, "blast " .. round(age / 3600) .. " h ago") end
+    elseif st == "quiet" and not b.quiet then
+      b.quiet = true
+      log("base %d;%d silent", b.cx, b.cz)
+    elseif st == "active" and b.quiet then
+      b.quiet = nil
+      b.nextRecheck = nil
+      log("base %d;%d active again", b.cx, b.cz)
+    end
+    if not isBlast(b) and age > CFG.archiveAfter then archiveBase(b, "silent for " .. round(age / 3600) .. " h") end
+  end
+end
+
+local function pickRecheck()
+  local t = now()
+  for _, b in ipairs(bases) do
+    if b.quiet and not isBlast(b) and t >= (b.nextRecheck or 0) then return b end
+  end
+end
+
+local function notePlayer(list, nm, t)
+  list[nm] = t
+  local cnt, oldest, on = 0
+  for k, tt in pairs(list) do
+    cnt = cnt + 1
+    if not on or tt < on then oldest, on = k, tt end
+  end
+  if cnt > CFG.maxPlayers then list[oldest] = nil end
+end
+
+local function spyPoint(x, z)
+  satSend("spy", string.format("settarget %d %d", round(x), round(z)))
+  local loaded = satQuery("spy", "targetloaded") == "TRUE"
+
+  local smog = tonumber(satQuery("spy", "getsmog") or "") or 0
+  local names = {}
+  local raw = satQuery("spy", "spotplayers")
+  if raw and raw ~= "NONE" then for nm in raw:gmatch("[^;]+") do names[#names + 1] = nm end end
+  return loaded, smog, names
+end
+
+local function spy(b)
+  if not SAT.ok.spy then return end
+  local loaded, smog, names = spyPoint(b.cx, b.cz)
+  b.loaded, b.smog = loaded, smog
+  local t = now()
+  for _, nm in ipairs(names) do
+    if not b.players[nm] then log("%d;%d: player %s spotted", b.cx, b.cz, nm) end
+    notePlayer(b.players, nm, t)
+  end
+  b.spyAt = t
+  dirty = true
+end
+
+local function recheck(b)
+  log("rechecking base %d;%d", b.cx, b.cz)
+  narrowInfo = { kind = "base recheck", i = 1, n = 1, x = b.cx, z = b.cz,
+                 left = CFG.narrowDwell, tries = 0, answered = 0, found = 0 }
+  local found, diag = scanNarrow(b.cx, b.cz, CFG.narrowDwell)
+  narrowInfo = nil
+  local t = now()
+  if diag.answered == 0 then
+    b.nextRecheck = t + 60
+    return
+  end
+  if #found > 0 then
+    attachSources(found, nil, { b.cx, b.cz })
+    log("base %d;%d: sources confirmed (%d)", b.cx, b.cz, #found)
+    b.quiet, b.nextRecheck = nil, nil
+  else
+    b.nextRecheck = t + CFG.recheckEvery
+    if SAT.ok.spy then spy(b) end
+    log("base %d;%d: no emissions%s", b.cx, b.cz,
+      (SAT.ok.spy and not b.loaded) and " (chunk unloaded — owner likely offline)" or "")
+  end
+  dirty = true
+end
+
+local function pickBlastScan()
+  local t = now()
+  for _, b in ipairs(bases) do
+    if (b.scan == "wait" or b.scan == "scan") and t >= (b.scanRetry or 0) then return b end
+  end
+end
+
+local function blastStep(b)
+  local c0 = b.blasts and b.blasts[1]
+  local cx, cz = c0 and c0.x or b.cx, c0 and c0.z or b.cz
+  local pts = hexPoints(cx, cz, CFG.blastRings)
+  local i = math.min(b.scanI or 1, #pts)
+  if b.scan == "wait" then
+    log("blast %d;%d: %d site scan points — interleaved with other tasks", cx, cz, #pts)
+  end
+  b.scan = "scan"
+  local p = pts[i]
+  narrowInfo = { kind = "blast site", i = i, n = #pts, x = round(p[1]), z = round(p[2]),
+                 left = 0, tries = 0, answered = 0, found = 0 }
+  local found, diag = scanNarrow(p[1], p[2], i == 1 and CFG.narrowDwell or CFG.narrowDwellRing)
+  narrowInfo = nil
+  if not running then return end
+  if diag.answered == 0 then
+    log("! narrowband emission detector not responding")
+    b.scanRetry = now() + 60
+    return
+  end
+  b.scanI = i + 1
+  dirty = true
+  if #found > 0 then
+    local touched = attachSources(found, b, p)
+    if #b.sources == 0 then
+
+      local best, bd
+      for o in pairs(touched) do
+        for _, s in ipairs(o.sources) do
+          local d = (s.x - cx) ^ 2 + (s.z - cz) ^ 2
+          if not bd or d < bd then best, bd = o, d end
+        end
+      end
+      if best then
+        best.blasts = best.blasts or {}
+        for _, x in ipairs(b.blasts or {}) do best.blasts[#best.blasts + 1] = x end
+        for nm, tt in pairs(b.players) do
+          if not best.players[nm] or best.players[nm] < tt then best.players[nm] = tt end
+        end
+        removeBase(b)
+        log("blast %d;%d assigned to base %d;%d", cx, cz, best.cx, best.cz)
+        return
+      end
+    end
+  end
+  if b.scanI > #pts then
+    b.scanI = nil
+    if #b.sources == 0 then
+      b.scan = "empty"
+      log("blast %d;%d: no nearby sources", cx, cz)
+    else
+      b.scan = nil
+      log("%d;%d: blast site scan complete", b.cx, b.cz)
+    end
+  end
+end
+
+local function markRings(r)
+  r = r or 0
+  if r <= 250 then return 0 elseif r <= 680 then return 1 elseif r <= 1100 then return 2 end
+  return 3
+end
+
+local function pickMark()
+  local t = now()
+  local best
+  for _, m in ipairs(marks) do
+    if t >= (m.retry or 0) then
+      if m.scanI then return m end
+      local due = (m.lastScan or -1e12) + CFG.markEvery
+      if t >= due and (not best or due < ((best.lastScan or -1e12) + CFG.markEvery)) then best = m end
+    end
+  end
+  return best
+end
+
+local function markStep(m)
+  local pts = hexPoints(m.x, m.z, markRings(m.r))
+  local i = math.min(m.scanI or 1, #pts)
+  if i == 1 then m.acc = { found = {}, keys = {}, bases = {}, players = {}, smog = 0, loaded = false } end
+  m.scanI = i
+  local p = pts[i]
+  narrowInfo = { kind = "point " .. (m.name or (m.x .. ";" .. m.z)), i = i, n = #pts, x = round(p[1]), z = round(p[2]),
+                 left = 0, tries = 0, answered = 0, found = 0 }
+  local found, diag = scanNarrow(p[1], p[2], #pts == 1 and CFG.narrowDwell or CFG.narrowDwellRing)
+  narrowInfo = nil
+  if not running then return end
+  if diag.answered == 0 then
+    log("! narrowband emission detector not responding")
+    m.retry = now() + 60
+    return
+  end
+  local acc = m.acc
+  if #found > 0 then
+    for b in pairs(attachSources(found, nil, p)) do acc.bases[b.id] = true end
+    for _, e in ipairs(found) do
+      local k = e.t .. e.x .. ";" .. e.z
+      if not acc.keys[k] then acc.keys[k] = true; acc.found[#acc.found + 1] = e.t end
+    end
+  end
+  if SAT.ok.spy then
+    local loaded, smog, names = spyPoint(p[1], p[2])
+    acc.loaded = acc.loaded or loaded
+    if smog > acc.smog then acc.smog = smog end
+    for _, nm in ipairs(names) do acc.players[nm] = true end
+  end
+  m.scanI = i + 1
+  dirty = true
+  if m.scanI <= #pts then return end
+
+  local t = now()
+  m.scanI, m.lastScan = nil, t
+  local cnt, order = {}, {}
+  for _, ty in ipairs(acc.found) do
+    local nm = SHORT[ty] or ty
+    if not cnt[nm] then cnt[nm] = 0; order[#order + 1] = nm end
+    cnt[nm] = cnt[nm] + 1
+  end
+  local parts = {}
+  for _, nm in ipairs(order) do parts[#parts + 1] = cnt[nm] > 1 and (nm .. "×" .. cnt[nm]) or nm end
+  m.found = parts
+  m.bases = {}
+  for id in pairs(acc.bases) do m.bases[#m.bases + 1] = id end
+  table.sort(m.bases)
+  if SAT.ok.spy then
+    m.smog, m.loaded, m.spied = acc.smog, acc.loaded, true
+    for nm in pairs(acc.players) do
+      if not m.players[nm] then log("point %s: player %s spotted", m.name or (m.x .. ";" .. m.z), nm) end
+      notePlayer(m.players, nm, t)
+    end
+  end
+  m.acc = nil
+  log("point %s checked: %s", m.name or (m.x .. ";" .. m.z), #parts > 0 and table.concat(parts, ", ") or "no sources")
+end
+
+local lastSpy = -1e9
+local function pickSpy()
+  if not SAT.ok.spy then return nil end
+  for _, b in ipairs(bases) do if (b.spyAt or 0) == 0 then return b end end
+  if now() - lastSpy < CFG.spyEvery then return nil end
+  local best
+  for _, b in ipairs(bases) do
+    if now() - (b.spyAt or 0) >= CFG.spyPerBase and (not best or (b.spyAt or 0) < (best.spyAt or 0)) then
+      best = b
+    end
+  end
+  return best
+end
+
+local ui = { tab = 1, scroll = { 0, 0, 0, 0, 0 }, page = { 1, 1, 1, 1, 1 }, dlg = nil, msg = nil, msgUntil = 0,
+             work = {}, servicing = false,
+             buttons = {}, filter = "all", searchFocus = "acc",
+             search = { acc = { offset = 0 }, objects = { offset = 0 } } }
+local okU, unicode = pcall(require, "unicode")
+local gpu
+if sys.hasOC then
+  local okc, component = pcall(require, "component")
+  if okc and component.isAvailable and component.isAvailable("gpu") then gpu = component.gpu end
+end
+local function ulen(s) return okU and unicode.len(s) or #s end
+local function usub(s, i, j) return okU and unicode.sub(s, i, j) or s:sub(i, j) end
+local function upper(s) return (okU and unicode.upper) and unicode.upper(s) or s:upper() end
+local function pad(s, n)
+  s = tostring(s)
+  local l = ulen(s)
+  if l >= n then return usub(s, 1, n) end
+  return s .. string.rep(" ", n - l)
+end
+local function lpad(s, n)
+  s = tostring(s)
+  local l = ulen(s)
+  if l >= n then return usub(s, 1, n) end
+  return string.rep(" ", n - l) .. s
+end
+local function cpad(s, n)
+  s = tostring(s)
+  local l = ulen(s)
+  if l >= n then return usub(s, 1, n) end
+  local a = math.floor((n - l) / 2)
+  return string.rep(" ", a) .. s .. string.rep(" ", n - l - a)
+end
+local function ago(sec)
+  sec = math.max(0, sec or 0)
+  if sec < 90 then return round(sec) .. "s" end
+  if sec < 5400 then return round(sec / 60) .. "m" end
+  if sec < 48 * 3600 then return string.format("%.1fh", sec / 3600) end
+  return string.format("%.1fd", sec / 86400)
+end
+local function hms(sec)
+  sec = math.max(0, round(sec or 0))
+  return string.format("%dh%02dm", math.floor(sec / 3600), math.floor((sec % 3600) / 60))
+end
+
+local C = {
+  bg = 0x141414, dot = 0x2E2E2E, bar = 0x262626, cell = 0x1E1E1E, head = 0x1A1A1A,
+  btn = 0x3A3A3A, text = 0xE6E6E6, gray = 0x8C8C8C, dgray = 0x5A5A5A, sep = 0x333333,
+  label = 0xB4B4B4, red = 0xFF4940, redd = 0x992400, yel = 0xF0C030, grn = 0x2ECC71,
+  black = 0x000000, empty = 0x333333,
+}
+local TABS = { "SEARCH", "OBJECTS", "POINTS", "ARCHIVE", "SETTINGS" }
+local FIELDS = {
+  wide    = "Wideband detector frequency (empty — remove)",
+  narrow  = "Narrowband detector frequency (empty — remove)",
+  spy     = "Spy satellite frequency (empty — remove)",
+  home    = "Own territory center: X Z",
+  radius  = "Own territory radius, blocks (0 — none)",
+  markadd = "New point: X Z [scan radius, default 250] [name]",
+  markdel = "Point number (from column No.) to delete",
+}
+
+local function playersLabel(b, t)
+  local list = {}
+  for nm, tt in pairs(b.players or {}) do list[#list + 1] = { nm, tt } end
+  table.sort(list, function(a, c) return a[2] > c[2] end)
+  local parts = {}
+  for i, p in ipairs(list) do
+    if i > 6 then parts[#parts + 1] = "+" .. (#list - 6) break end
+    parts[#parts + 1] = p[1] .. " (" .. ago(t - p[2]) .. ")"
+  end
+  return #parts > 0 and table.concat(parts, ", ") or "—"
+end
+
+local function kindOf(b) return isBlast(b) and "(BLAST)" or "(BASE)" end
+
+local function scanLabel(b)
+  if b.scan == "wait" then return "NB: site scan queued"
+  elseif b.scan == "scan" then
+    return string.format("NB: site scan %d/%d", (b.scanI or 1) - 1, #hexPoints(0, 0, CFG.blastRings))
+  elseif b.scan == "empty" then return "NB: no nearby sources" end
+  return ""
+end
+
+local function stateParts(b, t, wbar)
+  wbar = wbar or 9
+  if isBlast(b) then
+    return { { string.rep("▚", wbar), C.red }, { " " .. ago(t - (lastBlast(b) or t)) .. " AGO", C.red } }, C.red
+  end
+  local st, age = baseState(b, t)
+  if st == "active" then
+    return { { string.rep("█", wbar), C.grn }, { " ACTIVE", C.grn } }, C.grn
+  end
+  local left = math.max(0, 1 - (age - CFG.staleAfter) / math.max(1, CFG.archiveAfter - CFG.staleAfter))
+  local n = math.max(1, math.floor(wbar * left + 0.5))
+  return { { string.rep("█", n), C.yel }, { string.rep(" ", wbar - n), C.yel },
+           { " SILENT " .. upper(ago(age)), C.yel } }, C.yel
+end
+
+local FW, FH = 160, 50
+local F = {}
+local grid = {}
+
+local function buildGrid()
+  grid = {}
+  for y = 1, FH do
+    local t = {}
+    for x = 1, FW do
+      local ch = " "
+      if y % 2 == 0 and x % 4 == 3 then ch = (y % 8 == 4 and x % 32 == 19) and "+" or "·" end
+      t[x] = ch
+    end
+    grid[y] = table.concat(t)
+  end
+end
+
+local function put(x, y, text, fg, bg)
+  if y < 1 or y > FH then return end
+  text = tostring(text)
+  local l = ulen(text)
+  if x < 1 then text = usub(text, 2 - x); l = l - (1 - x); x = 1 end
+  if x > FW or l <= 0 then return end
+  if x + l - 1 > FW then text = usub(text, 1, FW - x + 1); l = FW - x + 1 end
+  local r = F[y]
+  r[#r + 1] = { x, text, fg, bg or C.bg, l }
+end
+local function fill(x, y, w, h, bg, fg, ch)
+  if w <= 0 then return end
+  for yy = y, y + h - 1 do put(x, yy, string.rep(ch or " ", w), fg or bg, bg) end
+end
+local function button(x1, y1, x2, y2, act)
+  ui.buttons[#ui.buttons + 1] = { x1 = x1, y1 = y1, x2 = x2, y2 = y2, act = act }
+end
+
+local function resolveRow(y)
+  local segs = {}
+  for _, r in ipairs(F[y]) do
+    local a, b = r[1], r[1] + r[5] - 1
+    local ns = {}
+    for _, sg in ipairs(segs) do
+      local s0, s1 = sg[1], sg[1] + sg[5] - 1
+      if s1 < a or s0 > b then ns[#ns + 1] = sg
+      else
+        if s0 < a then ns[#ns + 1] = { s0, usub(sg[2], 1, a - s0), sg[3], sg[4], a - s0 } end
+        if s1 > b then ns[#ns + 1] = { b + 1, usub(sg[2], sg[5] - (s1 - b) + 1), sg[3], sg[4], s1 - b } end
+      end
+    end
+    ns[#ns + 1] = r
+    segs = ns
+  end
+  table.sort(segs, function(p, q) return p[1] < q[1] end)
+  local out, x = {}, 1
+  for _, sg in ipairs(segs) do
+    if sg[1] > x then out[#out + 1] = { x, usub(grid[y], x, sg[1] - 1), C.dot, C.bg, sg[1] - x } end
+    out[#out + 1] = sg
+    x = sg[1] + sg[5]
+  end
+  if x <= FW then out[#out + 1] = { x, usub(grid[y], x, FW), C.dot, C.bg, FW - x + 1 } end
+
+  local m = {}
+  for _, sg in ipairs(out) do
+    local blank = not sg[2]:find("[^ ]")
+    local fg = blank and sg[4] or sg[3]
+    local p = m[#m]
+    if p and p[4] == sg[4] and (p[3] == fg or blank or p.blank) then
+      if p.blank and not blank then p[3] = fg end
+      p[2] = p[2] .. sg[2]; p[5] = p[5] + sg[5]
+      p.blank = p.blank and blank
+    else
+      m[#m + 1] = { sg[1], sg[2], fg, sg[4], sg[5], blank = blank }
+    end
+  end
+  return m
+end
+
+local L = {}
+
+local function redbar(x, y, w, text)
+  fill(x, y, w, 1, C.red)
+  put(x + math.floor((w - ulen(text)) / 2), y, text, C.black, C.red)
+end
+
+local function labelbar(x, y, w, text)
+  fill(x, y, w, 1, C.label)
+  put(x + 1, y, text, C.black, C.label)
+end
+
+local function btn(x, y, w, h, text, act, kind)
+  local bg = (kind == "on" or kind == "red") and C.red or (kind == "quit" and C.redd or C.btn)
+  local fg = (kind == "on" or kind == "red") and C.black or C.text
+  fill(x, y, w, h, bg)
+  put(x + math.floor((w - ulen(text)) / 2), y + math.floor(h / 2), text, fg, bg)
+  if act then button(x, y, x + w - 1, y + h - 1, act) end
+end
+
+local function listrow(x, y, w, text, right, rcol, act, alert)
+  local bg = alert and C.red or C.cell
+  fill(x, y, w, 1, bg)
+  put(x + 1, y, text, alert and C.black or C.text, bg)
+  if right then put(x + w - ulen(right) - 1, y, right, alert and C.black or (rcol or C.yel), bg) end
+  if act then button(x, y, x + w - 1, y, act) end
+end
+
+local function bar(x, y, w, frac, col, bg)
+  local n = math.max(0, math.min(w, math.floor(w * frac + 0.5)))
+  if n > 0 then put(x, y, string.rep("▄", n), col, bg) end
+  if n < w then put(x + n, y, string.rep("▄", w - n), C.empty, bg) end
+end
+
+local function scrollbar(x, y0, y1, first, shown, total, target)
+  if y1 - y0 < 2 or (target and total <= shown) then return end
+  put(x, y0, "▴", C.red); put(x, y1, "▾", C.red)
+  button(x, y0, x, y0, target and { search = target, delta = -1 } or "up")
+  button(x, y1, x, y1, target and { search = target, delta = 1 } or "down")
+  local h = y1 - y0 - 1
+  for yy = y0 + 1, y1 - 1 do
+    put(x, yy, "│", C.redd)
+    if target then
+      local offset = math.floor((yy - y0 - 1) / math.max(1, h - 1) * math.max(0, total - shown) + 0.5)
+      button(x, yy, x, yy, { search = target, offset = offset })
+    end
+  end
+  if total > 0 then
+    local th = math.max(1, math.floor(h * math.min(1, shown / total) + 0.5))
+    local tp = (total > shown) and math.floor((h - th) * first / (total - shown) + 0.5) or 0
+    for yy = y0 + 1 + tp, y0 + tp + th do put(x, yy, "┃", C.red) end
+  end
+end
+
+local function widths(cols, w)
+  local fixed = 0
+  for _, c in ipairs(cols) do fixed = fixed + (c.w or 0) + 3 end
+  local ws = {}
+  for i, c in ipairs(cols) do ws[i] = c.w or math.max(4, w - fixed) end
+  return ws
+end
+
+local function cellText(s, w, al)
+  if al == "r" then return lpad(s, w) elseif al == "c" then return cpad(s, w) end
+  return pad(s, w)
+end
+
+local function grid_table(x, y, w, cols, rows, empty)
+  local ws = widths(cols, w)
+  fill(x, y, w, 1, C.head)
+  local cx = x
+  for i, c in ipairs(cols) do
+    put(cx + 1, y, cellText(c[1], ws[i], c.al), C.gray, C.head)
+    if i < #cols then put(cx + ws[i] + 2, y, "│", C.label, C.head) end
+    cx = cx + ws[i] + 3
+  end
+  put(x, y + 1, string.rep("▔", w), C.label)
+  y = y + 2
+  if #rows == 0 then
+    fill(x, y, w, 1, C.cell)
+    put(x + 2, y, empty or "empty", C.dgray, C.cell)
+    return y + 1
+  end
+  for _, r in ipairs(rows) do
+    if r == "gap" then y = y + 1
+    else
+      local bg = r.bg or C.cell
+      fill(x, y, w, 1, bg)
+      if r.flag then put(x, y, "▛", C.red, bg) end
+      cx = x
+      for i, c in ipairs(cols) do
+        local v = r.cells[i]
+        local wcol = ws[i]
+        if type(v) == "table" and v.parts then
+          local px = cx + 1
+          for _, p in ipairs(v.parts) do
+            local txt = usub(p[1], 1, math.max(0, cx + 1 + wcol - px))
+            if ulen(txt) > 0 then put(px, y, txt, p[2], bg) end
+            px = px + ulen(txt)
+          end
+        else
+          local txt, col = v, r.fg or C.text
+          if type(v) == "table" then txt, col = v[1], v[2] end
+          if txt ~= nil and txt ~= "" then put(cx + 1, y, cellText(tostring(txt), wcol, c.al), col, bg) end
+        end
+        if i < #cols then put(cx + wcol + 2, y, "│", bg == C.red and C.redd or C.sep, bg) end
+        cx = cx + wcol + 3
+      end
+      if r.act then button(x, y, x + w - 1, y, r.act) end
+      y = y + 1
+    end
+  end
+  return y
+end
+
+local lastMap = -1e9
+
+local function nav()
+  fill(1, 1, FW, 3, C.bar)
+  local span = FW - 1
+  for i, name in ipairs(TABS) do
+    local offset = math.floor((i - 1) * span / #TABS)
+    local x = 2 + offset
+    local tw = math.floor(i * span / #TABS) - offset - 1
+    local on = (ui.tab == i)
+    put(x, 2, "/ " .. name, on and C.red or C.text, C.bar)
+    put(x + tw - 2, 2, tostring(i), C.dgray, C.bar)
+    put(x, 3, string.rep(on and "▀" or "▔", tw), on and C.red or C.btn, C.bar)
+    button(x, 1, x + tw - 1, 3, i)
+  end
+end
+
+local function roleState(r)
+  if not S.freq[r] then return "FREQUENCY NOT SET", C.gray, 0 end
+  if not SAT.ok[r] then return upper(tostring(SAT.status[r] or "no link")), C.red, 0 end
+  local ni = narrowInfo
+  if r == "narrow" and ni then
+    return string.format("SCANNING %d/%d", ni.i, ni.n), C.yel, (ni.i - 1 + 0.5) / ni.n
+  end
+  return "ONLINE", C.text, 1
+end
+
+local function leftPanel(t)
+  local x, w = L.lx, L.lw
+  local yMax = FH - 3
+  local y = L.top
+  redbar(x, y, w, "SATELLITES"); y = y + 2
+  local plates = {
+    { "wide", { "Wideband emission", "detector (WB)" } },
+    { "narrow", { "Narrowband emission", "detector (NB)" } },
+    { "spy", { "Spy satellite" } },
+  }
+  for _, p in ipairs(plates) do
+    local r, lbl = p[1], p[2]
+    if y + #lbl + 3 > yMax then break end
+    for i, s in ipairs(lbl) do labelbar(x, y + i - 1, w, s) end
+    y = y + #lbl
+    local st, col, frac = roleState(r)
+    fill(x, y, w, 3, C.cell)
+    put(x + 1, y, st, col, C.cell)
+    bar(x + 1, y + 1, w - 2, frac, (col == C.red) and C.red or C.grn, C.cell)
+    put(x + 1, y + 2, S.freq[r] and ("frequency " .. S.freq[r]) or "tab 5 — set frequency", C.gray, C.cell)
+    button(x, y - #lbl, x + w - 1, y + 2, 5)
+    y = y + 4
+  end
+
+  local nb, nx, active, quiet = 0, 0, 0, 0
+  for _, b in ipairs(bases) do
+    if isBlast(b) then nx = nx + 1
+    else
+      nb = nb + 1
+      if baseState(b, t) == "active" then active = active + 1 else quiet = quiet + 1 end
+    end
+  end
+  local ncl = 0
+  for _, c in ipairs(clusters) do if not c.pin and c.n > 0 then ncl = ncl + 1 end end
+  if y + 7 <= yMax then
+    put(x, y, "SUMMARY", C.gray); y = y + 1
+    listrow(x, y, w, "OBJECTS", string.format("%02d", #bases), nil, "f_all"); y = y + 1
+    listrow(x, y, w, "  BASES", string.format("%02d", nb), nil, "f_base"); y = y + 1
+    listrow(x, y, w, "  BLASTS", string.format("%02d", nx), nil, "f_blast"); y = y + 1
+    listrow(x, y, w, "MY POINTS", string.format("%02d", #marks), nil, 3); y = y + 1
+    listrow(x, y, w, "ARCHIVE", string.format("%02d", #archive), nil, 4); y = y + 1
+    listrow(x, y, w, "CLUSTERS", string.format("%02d", ncl), nil, 1); y = y + 2
+  end
+
+  local alert, act
+  if not ready() then alert, act = "SATELLITE LINK OFFLINE >", 5
+  else
+    local bl, bt
+    for _, b in ipairs(bases) do
+      local lb = lastBlast(b)
+      if lb and t - lb < 3600 and (not bt or lb > bt) then bl, bt = b, lb end
+    end
+    if bl then alert, act = string.format("BLAST %d;%d >", bl.cx, bl.cz), "f_blast" end
+  end
+  if alert and y <= yMax then listrow(x, y, w, alert, nil, nil, act, true); y = y + 2 end
+  if y + 3 <= yMax then
+    put(x, y, "TERRITORY", C.gray); y = y + 1
+    listrow(x, y, w, "CENTER", S.home.x .. " ; " .. S.home.z, C.text, "home"); y = y + 1
+    listrow(x, y, w, "RADIUS", S.radius > 0 and tostring(S.radius) or "NONE", C.text, "radius"); y = y + 2
+  end
+
+  local complexY = FH - 5
+  local statsEnd = CFG.rebootAfter > 0 and complexY - 2 or FH - 2
+  if y + 5 <= statsEnd then
+    y = statsEnd - 5
+    labelbar(x, y, w, "Search session"); y = y + 1
+    listrow(x, y, w, "WB SURVEYS", tostring(stats.surveys), C.yel); y = y + 1
+    listrow(x, y, w, "DETECTIONS RECEIVED", tostring(stats.samples), C.yel); y = y + 1
+    listrow(x, y, w, "ACTIVE BASES", tostring(active), C.grn); y = y + 1
+    listrow(x, y, w, "SILENT BASES", tostring(quiet), C.yel); y = y + 1
+    listrow(x, y, w, "UPTIME", hms(sys.uptime() - startedAt), C.text); y = y + 2
+  end
+  if CFG.rebootAfter > 0 and y <= complexY then
+    y = complexY
+    labelbar(x, y, w, "System"); y = y + 1
+    fill(x, y, w, 3, C.cell)
+    put(x + 1, y, "EMFIND", C.text, C.cell)
+    put(x + w - 9, y, "rev. 4.1", C.gray, C.cell)
+    local left = CFG.rebootAfter - (sys.uptime() - startedAt)
+    bar(x + 1, y + 1, w - 2, left / CFG.rebootAfter, C.grn, C.cell)
+    put(x + 1, y + 2, "reboot in " .. hms(left), C.gray, C.cell)
+  end
+
+  local dx = L.mx - 2
+  for yy = L.top, FH - 2 do if yy % 2 == 1 then put(dx, yy, "╎", C.btn) end end
+  put(dx, math.floor(FH / 2), "◆", C.dgray)
+end
+
+local LOGCOL = function(r)
+  if r:find("BLAST", 1, true) then return C.red end
+  if r:find("NEW", 1, true) then return C.grn end
+  if r:find("! ", 1, true) then return C.red end
+  if r:find("silent", 1, true) or r:find("miss", 1, true) then return C.yel end
+  return C.text
+end
+
+local function logPanel()
+  local y = L.logY
+  labelbar(L.mx, y, L.mw, "Operations log")
+  for i = 1, L.logN do
+    local r = recent[#recent - L.logN + i]
+    fill(L.mx, y + i, L.mw, 1, C.cell)
+    if r then
+      local tm, txt = r:match("^%[(.-)%] (.*)$")
+      put(L.mx + 1, y + i, tm or "", C.dgray, C.cell)
+      put(L.mx + 11, y + i, txt or r, LOGCOL(r), C.cell)
+    end
+  end
+end
+
+local function dialog()
+  local d = ui.dlg
+  if not d then return end
+  local y = L.dlgY
+  labelbar(L.mx, y, L.mw, d.prompt)
+  fill(L.mx, y + 1, L.mw, 1, C.cell)
+  put(L.mx + 1, y + 1, "> " .. d.buf .. "_", C.yel, C.cell)
+  fill(L.mx, y + 2, L.mw, 1, C.cell)
+  put(L.mx + 1, y + 2, "[ENTER] SAVE · [DEL] CANCEL", C.dgray, C.cell)
+end
+
+local function bottomBar(t)
+  local y = FH
+  put(1, y - 1, string.rep("▄", FW), C.red)
+
+  local txt, col
+  local ni = narrowInfo
+  if ui.msg and sys.uptime() < ui.msgUntil then txt, col = ui.msg, C.yel
+  elseif ni then
+    txt = string.format("▶ NB · %s · point %d/%d  %d;%d · %d s left · replies %d/%d · found %d",
+      ni.kind, ni.i, ni.n, ni.x, ni.z, ni.left, ni.answered, ni.tries, ni.found)
+    col = (ni.tries >= 3 and ni.answered == 0) and C.red or C.yel
+  else txt, col = "▶ " .. phase, ready() and C.gray or C.red end
+  local clock = date("%H:%M:%S")
+  local right = (not L.left and CFG.rebootAfter > 0)
+    and ("reboot in " .. hms(CFG.rebootAfter - (sys.uptime() - startedAt)) .. "   ") or ""
+  local rw = ulen(clock) + ulen(right) + 2
+  put(2, y, pad(txt, math.max(1, FW - 2 - rw - 1)), col)
+  put(FW - rw + 1, y, right, C.dgray)
+  put(FW - ulen(clock) - 1, y, clock, C.yel)
+end
+
+local function posOf(list)
+  local p = {}
+  for i, o in ipairs(list) do p[o] = i end
+  return p
+end
+
+function ui.searchRegion(key, y, footer, shown, total)
+  local r = ui.search[key]
+  r.x1, r.x2, r.y1, r.y2 = L.mx, FW - 1, y, footer
+  r.shown, r.total = shown, total
+  r.offset = math.max(0, math.min(r.offset, total - shown))
+  return r.offset
+end
+
+function ui.searchFooter(key, header, footer)
+  local r = ui.search[key]
+  if r.total <= r.shown then return end
+  scrollbar(FW - 1, header + 2, footer - 1, r.offset, r.shown, r.total, key)
+  put(L.mx, footer, string.format("... %d more · RECORDS %d-%d OF %d",
+    math.max(0, r.total - r.offset - r.shown), r.offset + 1,
+    math.min(r.total, r.offset + r.shown), r.total), C.gray)
+end
+
+function ui.searchAt(x, y)
+  if ui.tab ~= 1 or ui.dlg then return end
+  for _, key in ipairs({ "acc", "objects" }) do
+    local r = ui.search[key]
+    if r.x1 and x >= r.x1 and x <= r.x2 and y >= r.y1 and y <= r.y2 then return key end
+  end
+end
+
+local function tabSearch(t)
+  local x, w, y = L.mx, L.mw - 2, L.top
+  local acc, own = {}, 0
+  for _, c in ipairs(clusters) do
+    if c.state == "own" then own = own + 1
+    elseif not c.pin and c.n > 0 then acc[#acc + 1] = c end
+  end
+  local order = posOf(acc)
+  table.sort(acc, function(a, b)
+    if (a.state == "check") ~= (b.state == "check") then return a.state == "check" end
+    if a.n ~= b.n then return a.n > b.n end
+    return order[a] < order[b]
+  end)
+
+  local room = math.max(3, L.bodyEnd - y - 11)
+  local k = math.min(5, math.max(1, room - 2))
+  local m = math.min(10, math.max(1, math.floor((room - k) / 2)))
+  local ah = y + 3
+  local af = ah + 2 + k
+  local by = af + 2
+  local bh = by + 3
+  local bf = bh + 2 * m + 1
+  local a0 = ui.searchRegion("acc", y, af, k, #acc)
+  local b0 = ui.searchRegion("objects", by, bf, m, #bases)
+  ui.page[1] = ui.search[ui.searchFocus].shown
+
+  redbar(x, y, L.mw, "DETECTION ACCUMULATION")
+  put(x, y + 2, string.format("CLUSTERS %02d · OWN SOURCES %02d", #acc, own), C.gray)
+  local rows = {}
+  for i = a0 + 1, a0 + k do
+    local c = acc[i]
+    if not c then rows[#rows + 1] = { cells = {} }
+    else
+      local st = ({ collect = "collecting", check = "NB CHECK", lost = "lost" })[c.state] or c.state
+      local fg, bg = C.text, nil
+      if c.state == "check" then
+        fg, bg = C.black, C.red
+        if narrowInfo then st = string.format("NB CHECK · POINT %d/%d · %02d S LEFT", narrowInfo.i, narrowInfo.n, narrowInfo.left) end
+      elseif c.state == "lost" then fg = C.red
+      elseif c.own then st, fg = "own territory?", C.dgray
+      elseif c.misses > 0 then st = "collecting, misses " .. c.misses end
+      local num = (c.state == "check") and C.black or C.yel
+      rows[#rows + 1] = { fg = fg, bg = bg, cells = { string.format("%02d", i), c.n, { round(c.cx or 0), num },
+        { round(c.cz or 0), num }, round(c.se or 0), (c.lockX and "X" or "·") .. " " .. (c.lockZ and "Z" or "·"), st } }
+    end
+  end
+  grid_table(x, ah, w, { { "№", w = math.max(3, ulen(tostring(#acc))), al = "r" }, { "HITS", w = 6, al = "r" }, { "X", w = 7, al = "r" },
+    { "Z", w = 7, al = "r" }, { "±M", w = 5, al = "r" }, { "LOCK", w = 6, al = "c" }, { "STATUS" } }, rows)
+  ui.searchFooter("acc", ah, af)
+
+  redbar(x, by, L.mw, "CURRENT OBJECTS")
+  put(x, by + 2, string.format("OBJECTS %02d · DETAILS — TAB 2", #bases), C.gray)
+  rows = {}
+  for i = b0 + 1, b0 + m do
+    if i > b0 + 1 then rows[#rows + 1] = "gap" end
+    local b = bases[i]
+    if not b then rows[#rows + 1] = { cells = {} }
+    else
+      local parts = stateParts(b, t)
+      local blast = isBlast(b)
+      rows[#rows + 1] = { flag = true, act = blast and "f_blast" or "f_all", cells = {
+        string.format("%02d", i), { kindOf(b), blast and C.red or C.gray }, { b.cx, C.yel }, { b.cz, C.yel },
+        blast and { "nuclear blast ±" .. CFG.acc.HIGH .. (b.scan and (" · " .. scanLabel(b)) or ""), C.red } or srcLabel(b),
+        { parts = parts } } }
+    end
+  end
+  grid_table(x, bh, w, { { "№", w = math.max(3, ulen(tostring(#bases))), al = "r" }, { "TYPE", w = 7 }, { "X", w = 7, al = "r" }, { "Z", w = 7, al = "r" },
+    { "SOURCES" }, { "STATE", w = 20 } }, rows)
+  ui.searchFooter("objects", bh, bf)
+end
+
+local FILTERS = { { "all", "ALL" }, { "base", "BASES" }, { "blast", "BLASTS" }, { "quiet", "SILENT" } }
+local function filtered(t)
+  local out = {}
+  for i, b in ipairs(bases) do
+    local f = ui.filter
+    local ok = f == "all" or (f == "base" and not isBlast(b)) or (f == "blast" and isBlast(b))
+      or (f == "quiet" and not isBlast(b) and baseState(b, t) == "quiet")
+    if ok then out[#out + 1] = { b = b, n = i } end
+  end
+  return out
+end
+
+local function tabBases(t)
+  local x, w, y = L.mx, L.mw - 2, L.top
+  redbar(x, y, L.mw, "CURRENT OBJECTS"); y = y + 2
+  local fw = FW >= 110 and 16 or 11
+  for i, f in ipairs(FILTERS) do btn(x + (i - 1) * (fw + 1), y, fw, 1, f[2], "f_" .. f[1], ui.filter == f[1] and "on" or nil) end
+  local list = filtered(t)
+  local fit = math.max(1, math.floor((L.bodyEnd - (y + 4) + 1) / 3))
+  ui.page[2] = fit
+  local s0 = math.max(0, math.min(ui.scroll[2], #list - fit))
+  ui.scroll[2] = s0
+  local info = #list > 0 and string.format("RECORDS %d-%d OF %d", s0 + 1, math.min(#list, s0 + fit), #list) or "NO RECORDS"
+  put(x + w - ulen(info), y, info, C.gray)
+  y = y + 2
+  local wide = FW >= 110
+  local rows = {}
+  for k = s0 + 1, math.min(#list, s0 + fit) do
+    local b, n = list[k].b, k
+    local blast = isBlast(b)
+    local spy1, spy2 = "—", ""
+    if b.spyAt and b.spyAt > 0 then
+      spy1 = "smog " .. tostring(b.smog or "?")
+      spy2 = b.loaded and "chunk: yes" or "chunk: no"
+    elseif SAT.ok.spy then spy1 = "waiting" end
+    local src = blast and { "nuclear blast, accuracy ±" .. CFG.acc.HIGH, C.red } or srcLabel(b)
+    local info2 = "players: " .. playersLabel(b, t)
+    if blast or b.scan == "scan" then info2 = scanLabel(b) .. " · " .. info2 end
+    local parts = stateParts(b, t, 7)
+    local conf = blast and { "—", C.dgray } or (baseState(b, t) == "active" and "now" or ago(t - lastConfirm(b)))
+    local c1 = { string.format("%02d", n), { kindOf(b), blast and C.red or C.gray } }
+    local c2 = { "", "" }
+    if wide then
+      for _, v in ipairs({ { b.cx, C.yel }, { b.cz, C.yel } }) do c1[#c1 + 1] = v end
+      c2[3], c2[4] = "", ""
+    else
+      c1[#c1 + 1] = { b.cx, C.yel }; c2[3] = { b.cz, C.yel }
+    end
+    if wide then
+      for _, v in ipairs({ src, spy1, ago(t - (b.foundAt or t)), conf }) do c1[#c1 + 1] = v end
+      for _, v in ipairs({ { info2, C.gray }, { spy2, C.gray }, "", { parts = parts } }) do c2[#c2 + 1] = v end
+    else
+      for _, v in ipairs({ src, conf }) do c1[#c1 + 1] = v end
+      for _, v in ipairs({ { info2, C.gray }, { parts = parts } }) do c2[#c2 + 1] = v end
+    end
+    if #rows > 0 then rows[#rows + 1] = "gap" end
+    rows[#rows + 1] = { flag = true, cells = c1 }
+    rows[#rows + 1] = { cells = c2 }
+  end
+  local cols
+  if wide then
+    cols = { { "№", w = math.max(3, ulen(tostring(#list))), al = "r" }, { "TYPE", w = 7 }, { "X", w = 7, al = "r" }, { "Z", w = 7, al = "r" },
+      { "SOURCES / PLAYERS" }, { "SPY", w = 10 }, { "FOUND", w = 7, al = "r" }, { "CONFIRMED", w = 18 } }
+  else
+    cols = { { "№", w = math.max(3, ulen(tostring(#list))), al = "r" }, { "TYPE", w = 7 }, { "X / Z", w = 7, al = "r" }, { "SOURCES / PLAYERS" },
+      { "CONFIRM.", w = 16 } }
+  end
+  local ye = grid_table(x, y, w, cols, rows, "empty")
+  scrollbar(FW - 1, y + 2, math.max(ye - 1, y + 3), s0, fit, #list)
+end
+
+local function tabMarks(t)
+  local x, w, y = L.mx, L.mw - 2, L.top
+  redbar(x, y, L.mw, "MY POINTS"); y = y + 2
+  put(x, y, string.format("%d / %d · NB AND SPY CHECK EACH EVERY %d MIN", #marks, CFG.markMax,
+    round(CFG.markEvery / 60)), C.gray)
+  local fit = math.max(1, math.floor((L.bodyEnd - 4 - (y + 3) + 1) / 3))
+  ui.page[3] = fit
+  local s0 = math.max(0, math.min(ui.scroll[3], #marks - fit))
+  ui.scroll[3] = s0
+  y = y + 1
+  local bpos = {}
+  for i, b in ipairs(bases) do bpos[b.id] = i end
+  local wide = FW >= 110
+  local rows = {}
+  for i = s0 + 1, math.min(#marks, s0 + fit) do
+    local m = marks[i]
+    local src, col
+    if m.scanI then
+      src, col = string.format("scanning %d/%d", m.scanI - 1, #hexPoints(0, 0, markRings(m.r))), C.yel
+    elseif not m.lastScan then src, col = "not checked yet", C.dgray
+    elseif m.found and #m.found > 0 then src, col = table.concat(m.found, ", "), C.grn
+    else src, col = "no sources", C.text end
+    local links = {}
+    for _, id in ipairs(m.bases or {}) do if bpos[id] then links[#links + 1] = string.format("№%02d", bpos[id]) end end
+    local info = "players: " .. playersLabel(m, t) .. (#links > 0 and ("  → objects " .. table.concat(links, ", ")) or "")
+    local spy1, spy2 = "—", ""
+    if m.spied then spy1, spy2 = "smog " .. tostring(m.smog or 0), m.loaded and "chunk: yes" or "chunk: no" end
+    local checked = m.lastScan and ago(t - m.lastScan) or "—"
+    local c1, c2
+    if wide then
+      c1 = { string.format("%02d", i), m.name or "", { m.x, C.yel }, { m.z, C.yel }, m.r or 250, { src, col }, spy1, checked }
+      c2 = { "", "", "", "", "", { info, C.gray }, { spy2, C.gray }, "" }
+    else
+      c1 = { string.format("%02d", i), m.name or "", { m.x, C.yel }, { src, col }, spy1, checked }
+      c2 = { "", "", { m.z, C.yel }, { info, C.gray }, { spy2, C.gray }, "" }
+    end
+    if #rows > 0 then rows[#rows + 1] = "gap" end
+    rows[#rows + 1] = { flag = true, cells = c1 }
+    rows[#rows + 1] = { cells = c2 }
+  end
+  local cols
+  if wide then
+    cols = { { "№", w = 3, al = "r" }, { "NAME", w = 14 }, { "X", w = 7, al = "r" }, { "Z", w = 7, al = "r" },
+      { "RADIUS", w = 6, al = "r" }, { "NB SOURCES / PLAYERS" }, { "SPY", w = 10 }, { "CHECKED", w = 9, al = "r" } }
+  else
+    cols = { { "№", w = 3, al = "r" }, { "NAME", w = 10 }, { "X / Z", w = 7, al = "r" }, { "NB SOURCES / PLAYERS" },
+      { "SPY", w = 10 }, { "CHECKED", w = 7, al = "r" } }
+  end
+  local ye = grid_table(x, y + 1, w, cols, rows, "no points — use ADD (key A)")
+  scrollbar(FW - 1, y + 3, math.max(ye - 1, y + 4), s0, fit, #marks)
+  local by = L.bodyEnd - 2
+  btn(x, by, 18, 3, "A  ADD", "markadd", "red")
+  btn(x + 20, by, 18, 3, "D  DELETE", "markdel")
+  btn(x + L.mw - 26, by, 26, 3, "P  CHECK ALL NOW", "markall")
+end
+
+local function tabArchive(t)
+  local x, w, y = L.mx, L.mw - 2, L.top
+  redbar(x, y, L.mw, "ARCHIVE OF INACTIVE OBJECTS"); y = y + 2
+  put(x, y, string.format("%d / %d · NEWEST FIRST", #archive, CFG.archiveMax), C.gray)
+  local fit = math.max(1, L.bodyEnd - (y + 3) + 1)
+  ui.page[4] = fit
+  local s0 = math.max(0, math.min(ui.scroll[4], #archive - fit))
+  ui.scroll[4] = s0
+  local rows = {}
+  for i = s0 + 1, math.min(#archive, s0 + fit) do
+    local b = archive[i]
+    local pl = playersLabel(b, t)
+    rows[#rows + 1] = { fg = C.gray, cells = { string.format("%02d", i), { kindOf(b), isBlast(b) and C.redd or C.dgray },
+      { b.cx or 0, C.yel }, { b.cz or 0, C.yel }, srcLabel(b) .. (pl ~= "—" and (" · " .. pl) or ""),
+      ago(t - (b.archivedAt or t)), tostring(b.why or "") } }
+  end
+  local ye = grid_table(x, y + 1, w, { { "№", w = 3, al = "r" }, { "TYPE", w = 7 }, { "X", w = 7, al = "r" },
+    { "Z", w = 7, al = "r" }, { "SOURCES · PLAYERS" }, { "ARCHIVED", w = 8, al = "r" }, { "REASON", w = 18 } },
+    rows, "empty")
+  scrollbar(FW - 1, y + 3, math.max(ye - 1, y + 4), s0, fit, #archive)
+end
+
+local function tabSettings(t)
+  local x, w, y = L.mx, L.mw, L.top
+  redbar(x, y, w, "SETTINGS"); y = y + 2
+  put(x, y, "BUTTON, TABLE ROW OR KEY", C.gray)
+  local function fr(r) return S.freq[r] and tostring(S.freq[r]) or "—" end
+  local function stc(r) return SAT.ok[r] and C.grn or (S.freq[r] and C.red or C.dgray) end
+  local function row(key, name, val, st, col, act)
+    return { flag = true, act = act, cells = { key, name, { val, C.yel }, { st or "", col or C.text } } }
+  end
+  local rows = {
+    row("W", "Wideband emission detector · required", fr("wide"), SAT.status.wide, stc("wide"), "wide"), "gap",
+    row("N", "Narrowband emission detector · required", fr("narrow"), SAT.status.narrow, stc("narrow"), "narrow"), "gap",
+    row("S", "Spy satellite · optional", fr("spy"), SAT.status.spy, stc("spy"), "spy"), "gap",
+    row("C", "Own territory center", S.home.x .. " " .. S.home.z, "", nil, "home"), "gap",
+    row("R", "Own territory radius", S.radius, S.radius <= 0 and "no territory" or "objects inside are excluded",
+      C.gray, "radius"),
+  }
+  y = grid_table(x, y + 1, w, { { "KEY", w = 3, al = "c" }, { "PARAMETER", w = 52 }, { "VALUE", w = 12, al = "r" },
+    { "STATE" } }, rows)
+  y = y + 1
+  local bw = 14
+  btn(x, y, bw, 3, "W  WB", "wide"); btn(x + bw + 1, y, bw, 3, "N  NB", "narrow")
+  btn(x + 2 * (bw + 1), y, bw, 3, "S  SPY", "spy"); btn(x + 3 * (bw + 1), y, bw, 3, "C  CENTER", "home")
+  btn(x + 4 * (bw + 1), y, bw, 3, "R  RADIUS", "radius")
+  btn(x + w - 24, y, 24, 3, "U  CHECK LINK", "refresh", "red")
+  y = y + 4
+  local auto = ""
+  for _, r in ipairs(ROLES) do
+    if S.freq[r] and not SAT.ok[r] then auto = " · AUTO RETRY EVERY " .. (ready() and "5 MIN" or "30 S") break end
+  end
+  if y <= L.bodyEnd then put(x, y, "LINK CHECKED " .. upper(ago(sys.uptime() - lastMap)) .. " AGO" .. auto, C.gray) end
+  if y + 1 <= L.bodyEnd then
+    put(x, y + 1, "Frequencies may be set in advance. Once satellites are deployed, select CHECK LINK.", C.dgray)
+  end
+  if not sys.oc and y + 4 <= L.bodyEnd then put(x, y + 4, "(simulator mode)", C.dgray) end
+end
+
+local function geometry()
+  L.left = FW >= 120 and FH >= 40
+  L.lx, L.lw = 2, 31
+  L.mx = L.left and 36 or 2
+  L.mw = FW - L.mx - 1
+  L.top = 5
+  L.logN = (FH >= 45) and 5 or ((FH >= 32) and 4 or 3)
+  L.logY = FH - 2 - L.logN
+  L.dlgY = L.logY - 4
+  L.bodyEnd = (ui.dlg and L.dlgY or L.logY) - 2
+end
+
+local function buildFrame()
+  ui.buttons = {}
+  for y = 1, FH do F[y] = {} end
+  geometry()
+  local t = now()
+  nav()
+  if L.left then leftPanel(t) end
+  if ui.tab == 1 then tabSearch(t)
+  elseif ui.tab == 2 then tabBases(t)
+  elseif ui.tab == 3 then tabMarks(t)
+  elseif ui.tab == 4 then tabArchive(t)
+  else tabSettings(t) end
+
+  dialog()
+  logPanel()
+  bottomBar(t)
+end
+
+local function buildRows(W, H)
+  if W ~= FW or H ~= FH or #grid ~= FH then FW, FH = W, H; buildGrid() end
+  buildFrame()
+  local rows = {}
+  for y = 1, FH do
+    local segs = {}
+    for _, sg in ipairs(resolveRow(y)) do segs[#segs + 1] = { sg[2], sg[3], sg[4] } end
+    rows[y] = { segs = segs }
+  end
+  return rows
+end
+
+local prev = {}
+local lastScreen = -1e9
+local curFg, curBg
+local vram
+local VRAM_FROM = 60
+
+local function setColors(fg, bg)
+  if bg ~= curBg then gpu.setBackground(bg); curBg = bg end
+  if fg and fg ~= curFg then gpu.setForeground(fg); curFg = fg end
+end
+
+local function drawGroups(groups, order)
+  table.sort(order, function(a, b)
+    local ga, gb = groups[a], groups[b]
+    if ga.bg ~= gb.bg then return ga.bg < gb.bg end
+    return ga.fg < gb.fg
+  end)
+  for _, k in ipairs(order) do
+    local g = groups[k]
+    setColors(not g.blank and g.fg or nil, g.bg)
+    for _, r in ipairs(g) do gpu.set(r[1], r[2], r[3]) end
+  end
+end
+
+local function setupScreen()
+  prev, curFg, curBg = {}, nil, nil
+  buildGrid()
+  if vram then pcall(gpu.freeBuffer, vram); vram = nil end
+  if gpu.allocateBuffer then
+    local ok, b = pcall(gpu.allocateBuffer, FW, FH)
+    if ok and type(b) == "number" and b > 0 then vram = b end
+  end
+end
+
+local function screen(force)
+  if not sys.oc then return end
+  if not force and sys.uptime() - lastScreen < CFG.screenEvery then return end
+  lastScreen = sys.uptime()
+  if not gpu then return end
+  local W, H = gpu.getResolution()
+  if W ~= FW or H ~= FH or #grid ~= FH then FW, FH = W, H; setupScreen() end
+  buildFrame()
+
+  local groups, order, all, allOrder, nch = {}, {}, {}, {}, 0
+  local newPrev = {}
+  for y = 1, FH do
+    local keys, old = {}, prev[y]
+    for _, sg in ipairs(resolveRow(y)) do
+      local k = sg[1] .. "\1" .. sg[3] .. "\1" .. sg[4] .. "\1" .. sg[2]
+      keys[k] = true
+      local ck = sg[4] * 16777216 + sg[3]
+      local ga = all[ck]
+      if not ga then ga = { fg = sg[3], bg = sg[4], blank = true }; all[ck] = ga; allOrder[#allOrder + 1] = ck end
+      ga[#ga + 1] = { sg[1], y, sg[2] }
+      ga.blank = ga.blank and sg.blank
+      if not old or not old[k] then
+        local g = groups[ck]
+        if not g then g = { fg = sg[3], bg = sg[4], blank = true }; groups[ck] = g; order[#order + 1] = ck end
+        g[#g + 1] = { sg[1], y, sg[2] }
+        g.blank = g.blank and sg.blank
+        nch = nch + 1
+      end
+    end
+    newPrev[y] = keys
+  end
+  prev = newPrev
+  if nch == 0 then return end
+  if vram and nch >= VRAM_FROM then
+
+    local ok = pcall(function()
+      gpu.setActiveBuffer(vram); curFg, curBg = nil, nil
+      drawGroups(all, allOrder)
+      gpu.setActiveBuffer(0); curFg, curBg = nil, nil
+      gpu.bitblt(0, 1, 1, FW, FH, vram, 1, 1)
+    end)
+    if ok then return end
+    pcall(gpu.setActiveBuffer, 0)
+    vram, curFg, curBg = nil, nil, nil
+    drawGroups(all, allOrder)
+    return
+  end
+  drawGroups(groups, order)
+end
+
+local function screenCleanup()
+  if gpu and vram then pcall(gpu.setActiveBuffer, 0); pcall(gpu.freeBuffer, vram); vram = nil end
+end
+
+local function message(s) ui.msg, ui.msgUntil = s, sys.uptime() + 5 end
+
+local function refreshSats(manual)
+  local before = {}
+  for _, r in ipairs(ROLES) do before[r] = SAT.status[r] end
+  SAT.map()
+  lastMap = sys.uptime()
+  local parts = {}
+  for _, r in ipairs(ROLES) do
+    if SAT.status[r] ~= before[r] and before[r] then
+      log("%s: %s", ROLE_NAME[r], tostring(SAT.status[r]))
+    end
+    if S.freq[r] then parts[#parts + 1] = ROLE_SHORT[r] .. ": " .. (SAT.ok[r] and "OK" or tostring(SAT.status[r])) end
+  end
+  if manual then message(#parts > 0 and table.concat(parts, " · ") or "frequencies not set") end
+end
+
+local function openDialog(field)
+  local cur = ""
+  if field == "home" then cur = S.home.x .. " " .. S.home.z
+  elseif field == "radius" then cur = tostring(S.radius)
+  elseif field == "markadd" or field == "markdel" then cur = ""
+  elseif S.freq[field] then cur = tostring(S.freq[field]) end
+  ui.dlg = { field = field, prompt = FIELDS[field], buf = cur }
+end
+
+local function applyDialog(d)
+  if not d then d = ui.dlg; ui.dlg = nil end
+  local v = d.buf:match("^%s*(.-)%s*$")
+  if d.field == "markadd" then
+    local x, z, rest = v:match("^(%-?%d+)[%s,;]+(%-?%d+)%s*(.*)$")
+    if not x then message("Required: X Z [radius] [name]") return end
+    if #marks >= CFG.markMax then message("Point limit reached: " .. CFG.markMax .. " — delete unused points") return end
+    local r, name = rest:match("^(%d+)%s*(.*)$")
+    if r then r = tonumber(r) else r, name = 250, rest end
+    name = (name ~= "") and name or nil
+    local m = { id = nextMarkId, x = tonumber(x), z = tonumber(z), r = math.max(0, math.min(r, 1500)),
+                name = name, added = now(), players = {} }
+    nextMarkId = nextMarkId + 1
+    marks[#marks + 1] = m
+    dirty = true
+    log("point added at %d;%d%s, scan radius %d", m.x, m.z, name and (" «" .. name .. "»") or "", m.r)
+    if inTerritory(m.x, m.z) then message("Point is inside own territory: sources there are not recorded") end
+    return
+  elseif d.field == "markdel" then
+    local n = tonumber(v)
+    local m = n and marks[n]
+    if m then
+      table.remove(marks, n); dirty = true
+      log("point %s deleted", m.name or (m.x .. ";" .. m.z))
+    else
+      message("Point number " .. tostring(v) .. " not found")
+    end
+    return
+  elseif d.field == "home" then
+    local x, z = v:match("^(%-?%d+)%s+(%-?%d+)$")
+    if not x then message("Two numbers required: X Z") return end
+    S.home = { x = tonumber(x), z = tonumber(z) }
+    saveSettings(); applyTerritory()
+    log("territory center %d;%d", S.home.x, S.home.z)
+  elseif d.field == "radius" then
+    local r = tonumber(v)
+    if not r or r < 0 then message("Enter a number >= 0") return end
+    S.radius = math.floor(r)
+    saveSettings(); applyTerritory()
+    log("territory radius %d", S.radius)
+  else
+    if v == "" then
+      S.freq[d.field] = nil
+      log("%s: frequency removed", ROLE_NAME[d.field])
+    else
+      local f = tonumber(v)
+      if not f or f ~= math.floor(f) then message("Frequency must be an integer") return end
+      S.freq[d.field] = math.floor(f)
+      log("%s: frequency %d", ROLE_NAME[d.field], S.freq[d.field])
+    end
+    saveSettings()
+    SAT.map(); lastMap = sys.uptime()
+    message(ROLE_SHORT[d.field] .. ": " .. tostring(SAT.status[d.field]))
+  end
+end
+
+local function scrollBy(n, target)
+  if ui.dlg then return end
+  if ui.tab == 1 then
+    target = target or ui.searchFocus
+    local r = ui.search[target]
+    if not r or not r.shown then return end
+    ui.searchFocus, ui.page[1] = target, r.shown
+    r.offset = math.max(0, math.min(math.max(0, r.total - r.shown), r.offset + n))
+  elseif ui.tab >= 2 and ui.tab <= 4 then
+    ui.scroll[ui.tab] = math.max(0, ui.scroll[ui.tab] + n)
+  end
+end
+
+local function doAction(a)
+
+  if a ~= "refresh" and a ~= "markall" then ui.dlg = nil end
+  if type(a) == "table" and a.search then
+    local r = ui.search[a.search]
+    if r then scrollBy(a.delta or ((a.offset or r.offset) - r.offset), a.search) end
+  elseif type(a) == "number" then ui.tab = a
+  elseif a == "prev" then ui.tab = (ui.tab - 2) % #TABS + 1
+  elseif a == "next" then ui.tab = ui.tab % #TABS + 1
+  elseif a == "quit" then running = false
+  elseif a == "up" then scrollBy(-math.max(1, ui.page[ui.tab] - 1))
+  elseif a == "down" then scrollBy(math.max(1, ui.page[ui.tab] - 1))
+  elseif a == "refresh" then
+    if ui.servicing then ui.refreshRequested = true; message("Link check queued")
+    else refreshSats(true) end
+  elseif a == "fcycle" then
+    for i, f in ipairs(FILTERS) do
+      if f[1] == ui.filter then ui.filter = FILTERS[i % #FILTERS + 1][1] break end
+    end
+    ui.scroll[2] = 0
+  elseif type(a) == "string" and a:sub(1, 2) == "f_" then
+    ui.filter, ui.tab, ui.scroll[2] = a:sub(3), 2, 0
+  elseif a == "markall" then
+    for _, m in ipairs(marks) do if not m.scanI then m.lastScan = nil end end
+    message("All points queued for checking")
+  elseif FIELDS[a] then openDialog(a) end
+  lastScreen = -1e9
+end
+
+local KEY = { [16] = "quit", [2] = 1, [3] = 2, [4] = 3, [5] = 4, [6] = 5, [22] = "refresh", [63] = "refresh",
+              [203] = "prev", [205] = "next" }
+local KEY2 = { [33] = "fcycle" }
+local KEY3 = { [30] = "markadd", [32] = "markdel", [25] = "markall" }
+local KEY5 = { [17] = "wide", [49] = "narrow", [31] = "spy", [46] = "home", [19] = "radius" }
+local CHAR = { q = "quit", ["1"] = 1, ["2"] = 2, ["3"] = 3, ["4"] = 4, ["5"] = 5, u = "refresh" }
+local CHAR2 = { f = "fcycle" }
+local CHAR3 = { a = "markadd", d = "markdel", p = "markall" }
+local CHAR5 = { w = "wide", n = "narrow", s = "spy", c = "home", r = "radius" }
+local queue = {}
+
+local function handleKey(ch, code)
+  local c = (ch and ch >= 32 and ch < 127) and string.char(ch) or ""
+  if ui.dlg then
+    if code == 63 then doAction("refresh")
+    elseif code == 28 then
+      if ui.servicing then
+        if #ui.work < 32 then ui.work[#ui.work + 1] = ui.dlg; ui.dlg = nil
+        else message("Save queue is busy") end
+      else applyDialog() end
+    elseif code == 211 or code == 1 then ui.dlg = nil
+    elseif code == 14 then ui.dlg.buf = usub(ui.dlg.buf, 1, math.max(0, ulen(ui.dlg.buf) - 1))
+    elseif ui.dlg.field == "markadd" then
+      if ch and ch >= 32 and ulen(ui.dlg.buf) < 48 then
+        ui.dlg.buf = ui.dlg.buf .. ((okU and unicode.char) and unicode.char(ch) or c)
+      end
+    elseif c:match("[%d%- ]") and #ui.dlg.buf < 24 then ui.dlg.buf = ui.dlg.buf .. c end
+    lastScreen = -1e9
+    return
+  end
+  local lc = c:lower()
+  if code == 200 then scrollBy(-1); lastScreen = -1e9
+  elseif code == 208 then scrollBy(1); lastScreen = -1e9
+  elseif code == 201 then doAction("up")
+  elseif code == 209 then doAction("down")
+  else
+    local a = KEY[code] or CHAR[lc]
+    if not a and ui.tab == 2 then a = KEY2[code] or CHAR2[lc] end
+    if not a and ui.tab == 3 then a = KEY3[code] or CHAR3[lc] end
+    if not a and ui.tab == 5 then a = KEY5[code] or CHAR5[lc] end
+    if a then doAction(a) end
+  end
+end
+
+local function handleTouch(x, y)
+  local target = ui.searchAt(x, y)
+  if target then ui.searchFocus, ui.page[1] = target, ui.search[target].shown end
+  for i = #ui.buttons, 1, -1 do
+    local b = ui.buttons[i]
+    if x >= b.x1 and x <= b.x2 and y >= b.y1 and y <= b.y2 then doAction(b.act) return end
+  end
+end
+
+local function onKey(_, _, ch, code) queue[#queue + 1] = { "key", ch, code } end
+local function onTouch(_, _, x, y) queue[#queue + 1] = { "touch", x, y } end
+local function onScroll(_, _, x, y, dir) queue[#queue + 1] = { "scroll", dir, x, y } end
+if sys.oc then
+  sys.event.listen("key_down", onKey)
+  sys.event.listen("touch", onTouch)
+  sys.event.listen("scroll", onScroll)
+end
+
+serviceInput = function()
+  if ui.servicing then return end
+  ui.servicing = true
+  while #queue > 0 do
+    local e = table.remove(queue, 1)
+    if e[1] == "key" then handleKey(e[2], e[3])
+    elseif e[1] == "touch" then handleTouch(e[2], e[3])
+    else
+      local target = ui.searchAt(e[3], e[4])
+      if ui.tab ~= 1 or target then scrollBy(-(tonumber(e[2]) or 0), target) end
+      lastScreen = -1e9
+    end
+  end
+
+  screen()
+  ui.servicing = false
+end
+
+if sys.oc then
+  sys.sleep = function(seconds)
+    local untilAt = sys.uptime() + math.max(0, tonumber(seconds) or 0)
+    repeat
+      serviceInput()
+      local left = untilAt - sys.uptime()
+      if left <= 0 then break end
+      sys.event.pull(math.min(left, 0.05))
+    until false
+  end
+end
+
+tick = function()
+  serviceInput()
+
+  local work = ui.work; ui.work = {}
+  for _, d in ipairs(work) do applyDialog(d) end
+  if ui.refreshRequested then ui.refreshRequested = nil; refreshSats(true) end
+  if not sys.oc and sys.uptime() > sys.limit then running = false end
+  screen()
+end
+
+local function autoRefresh()
+  for _, r in ipairs(ROLES) do
+    if S.freq[r] and not SAT.ok[r] then
+      if sys.uptime() - lastMap > (ready() and 300 or 30) then refreshSats(false) end
+      return
+    end
+  end
+end
+
+local function runSearch()
+  loadData()
+  loadAccum()
+  maintain()
+  SAT.map(); lastMap = sys.uptime()
+  log("start: WB — %s; NB — %s; spy — %s", tostring(SAT.status.wide),
+    tostring(SAT.status.narrow), tostring(SAT.status.spy))
+  if not ready() then ui.tab = 5 end
+  local lastMaint, lastSave, lastSync = sys.uptime(), sys.uptime(), sys.uptime()
+  while running do
+    tick()
+    autoRefresh()
+    if not ready() then
+      phase = "WB and NB required: set frequencies in tab 5 and select CHECK LINK"
+      sys.sleep(0.5)
+    else
+      phase = "WB · collecting detections"
+      local evs = wideStep()
+      if sys.uptime() - lastMaint > 5 then
+        maintain(); updateBases(); lastMaint = sys.uptime()
+      end
+      if sys.uptime() - lastSync > 300 then syncClock(); lastSync = sys.uptime() end
+
+      local sb = pickSpy()
+      local c = pickCandidate()
+      if sb and (sb.spyAt or 0) == 0 then
+        spy(sb); lastSpy = now()
+      elseif c then
+        verify(c)
+      else
+        local bl = pickBlastScan()
+        local mk = not bl and pickMark()
+        local b = not bl and not mk and pickRecheck()
+        if bl then blastStep(bl)
+        elseif mk then markStep(mk)
+        elseif b then recheck(b)
+        elseif sb then spy(sb); lastSpy = now() end
+      end
+      if dirty and sys.uptime() - lastSave > CFG.saveEvery then saveData(); lastSave = sys.uptime() end
+      if CFG.rebootAfter > 0 and sys.uptime() - startedAt > CFG.rebootAfter then
+        log("scheduled computer reboot")
+        rebootNow, running = true, false
+        break
+      end
+      sys.sleep(((not evs or #evs == 0) and CFG.wideGap or 0) + math.random() * CFG.jitter)
+    end
+  end
+  saveData()
+  saveAccum()
+end
+
+local function runProbe(X, Z)
+  SAT.map()
+  for _, r in ipairs(ROLES) do print(ROLE_NAME[r] .. ": " .. tostring(SAT.status[r])) end
+  if not SAT.ok.narrow then return end
+  local found, diag = scanNarrow(X, Z, CFG.narrowDwell)
+  print(string.format("NB scan %d;%d: replies %d of %d, sources %d", X, Z, diag.answered, diag.tries, #found))
+  for _, e in ipairs(found) do print(string.format("  %s  %d;%d", e.t, e.x, e.z)) end
+end
+
+local function runCalib(X, Z, dur)
+  SAT.map()
+  if not SAT.ok.wide then print("WB: " .. tostring(SAT.status.wide)) return end
+  local xs, zs, t0, edge, n = {}, {}, sys.uptime(), 0, 0
+  local A = CFG.acc.MEDIUM
+  while sys.uptime() - t0 < dur and running do
+    local t = now()
+    satSend("wide", "survey")
+    for _, e in ipairs(readEvents("wide", "gettype", CFG.wantTypes) or {}) do
+      local key = e.x .. ";" .. e.z
+      if math.abs(e.x - X) <= 1.5 * A and math.abs(e.z - Z) <= 1.5 * A and not seen[key] then
+        seen[key] = t
+        n = n + 1
+        xs[n], zs[n] = e.x, e.z
+      end
+    end
+    sys.sleep(0.2 + math.random() * 0.3)
+  end
+  if n == 0 then print("No detections near this point") return end
+  local mx, mz = 0, 0
+  for i = 1, n do mx, mz = mx + xs[i], mz + zs[i] end
+  mx, mz = mx / n, mz / n
+  local lx, lz = axisLock(xs, mx, A), axisLock(zs, mz, A)
+  for i = 1, n do if lx and math.abs(xs[i] - lx) == A then edge = edge + 1 end end
+  print(string.format("detections %d, mean %d;%d, lock X=%s Z=%s, X-edge samples %d%% (expected ~32%%)",
+    n, round(mx), round(mz), tostring(lx or "-"), tostring(lz or "-"), round(100 * edge / n)))
+end
+
+local ok, err = pcall(function()
+  if args[1] == "probe" then runProbe(tonumber(args[2]) or 0, tonumber(args[3]) or 0)
+  elseif args[1] == "calib" then runCalib(tonumber(args[2]) or 0, tonumber(args[3]) or 0, tonumber(args[4]) or 300)
+  else runSearch() end
+end)
+if sys.oc then
+  sys.event.ignore("key_down", onKey)
+  sys.event.ignore("touch", onTouch)
+  sys.event.ignore("scroll", onScroll)
+  screenCleanup()
+  if gpu then
+    gpu.setBackground(0x000000); gpu.setForeground(0xFFFFFF)
+    local okT, term = pcall(require, "term")
+    if okT and args[1] == nil then term.clear() end
+  end
+end
+if not ok then
+  pcall(saveData)
+  if args[1] == nil then pcall(saveAccum) end
+  if not tostring(err):find("interrupted") then
+    log("ERROR: %s", tostring(err))
+    io.stderr:write(tostring(err), "\n")
+  end
+end
+if rebootNow and sys.oc then
+  print("emfind: scheduled computer reboot (every " .. round(CFG.rebootAfter / 3600) .. " h)")
+  require("computer").shutdown(true)
+end
+return { clusters = clusters, bases = bases, archive = archive, stats = stats, buildRows = buildRows, ui = ui,
+  key = handleKey, touch = handleTouch, S = S, getBases = function() return bases, archive end }
+]====]
   local function desktopApp()
     local hits, startBtn, done, ICONS = {}, nil, false, nil
     local appNames = {
       me = "ME Storage", rs = "RS Storage", settings = "Settings", notepad = "Notepad",
       terminal = "Terminal", rbmk = "RBMK Console", fusion = "Fusion Monitor", icf = "ICF Control", weather = "Weather & Time", radar = "NTM Radar", gasturbine = "Gas Turbine", vent = "Atmospheric Vent", stardar = "Stardar", rocketpad = "Rocket Pad", reactx = "ReactX", reactsli = "ReactSLI", music = "Music Player",
-      gallery = "Gallery", messages = "Messages", credits = "Credits",
+      gallery = "Gallery", messages = "Messages", credits = "Credits", emfind = "Emission Finder",
     }
     local function draw()
       ICONS = buildIcons()
@@ -8043,6 +10647,7 @@ end
       elseif app == "rbmk" then launchRbmk()
       elseif app == "fusion" then fusionApp()
       elseif app == "icf" then icfApp()
+      elseif app == "emfind" then runLua(EMFIND_SOURCE, "emfind.lua", {})
       elseif app == "weather" then weatherTimeApp()
       elseif app == "radar" then ntmComponentApp("ntm_radar", "RADAR")
       elseif app == "gasturbine" then ntmComponentApp("ntm_gas_turbine", "GAS TURBINE")
