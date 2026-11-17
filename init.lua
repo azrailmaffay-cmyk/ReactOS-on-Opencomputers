@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v4.8  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v4.9  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v4.8"
+local VERSION = "ReactOS-OC v4.9"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -8015,7 +8015,7 @@ end
   end
 
   local EMFIND_SOURCE = [====[
--- ReactOS Emission Finder v4.8
+-- ReactOS Emission Finder v4.9
 local CFG = {
   acc          = { LOW = 10000, MEDIUM = 2500, HIGH = 500 },
   wantTypes    = { MEDIUM = true, HIGH = true },
@@ -8250,6 +8250,7 @@ function SAT.map()
   for _, r in ipairs(ROLES) do
     if S.freq[r] then need[#need + 1] = r else SAT.status[r] = "frequency not set" end
   end
+  if #need == 0 then SAT.pool = {}; return end
   if sim then
     for _, r in ipairs(need) do
       local t = sim.typeAt(S.freq[r])
@@ -8282,9 +8283,9 @@ function SAT.map()
       call(p, "setFreq", tonumber(S.freq[r]))
       SAT.tuned[p.address] = S.freq[r]
       local _, t = call(p, "getType")
-      local _, con = call(p, "isConnected")
       SAT.role[r] = p
       if t == TYPES[r] then
+        local _, con = call(p, "isConnected")
         SAT.ok[r] = true
         SAT.status[r] = "OK, station " .. p.address:sub(1, 8) .. (con and "" or " (sky obstructed!)")
       elseif t == "" or t == nil then
@@ -8573,11 +8574,15 @@ local function maintain()
   local merged = true
   while merged do
     merged = false
-    for i = 1, #clusters do
-      local a = clusters[i]
-      for j = i + 1, #clusters do
-        local b = clusters[j]
-        if a.type == b.type and not a.pin and not b.pin and a.n > 0 and b.n > 0 then
+    local candidates = {}
+    for _, c in ipairs(clusters) do
+      if not c.pin and c.n > 0 then candidates[#candidates + 1] = c end
+    end
+    for i = 1, #candidates do
+      local a = candidates[i]
+      for j = i + 1, #candidates do
+        local b = candidates[j]
+        if a.type == b.type then
           local d = math.sqrt((a.cx - b.cx) ^ 2 + (a.cz - b.cz) ^ 2)
           if d < CFG.mergeK * math.sqrt(a.se ^ 2 + b.se ^ 2) then
             local dst, src = a, b
@@ -10547,7 +10552,15 @@ local function runSearch()
   diagnosticStage = "Checking NTM satellite links"
   phase = diagnosticStage .. "..."
   screen(true)
-  SAT.map(); lastMap = sys.uptime()
+  if S.freq.wide and S.freq.narrow then
+    SAT.map()
+  else
+    SAT.role, SAT.tuned, SAT.ok, SAT.status, SAT.pool = {}, {}, {}, {}, {}
+    for _, r in ipairs(ROLES) do
+      SAT.status[r] = S.freq[r] and "not checked: both required detector links are needed" or "frequency not set"
+    end
+  end
+  lastMap = sys.uptime()
   if not ready() then
     local missing = {}
     for _, r in ipairs({ "wide", "narrow" }) do
@@ -10568,15 +10581,14 @@ local function runSearch()
     loadData()
     loadAccum()
     if not running then return end
-    diagnosticStage = "Rebuilding saved search data"
-    phase = diagnosticStage .. "..."
+    diagnosticStage = "Saved data restored; preparing scan"
+    phase = "Starting detector scan..."
     screen(true)
-    maintain()
   end
   log("start: WB — %s; NB — %s; spy — %s", tostring(SAT.status.wide),
     tostring(SAT.status.narrow), tostring(SAT.status.spy))
   if not ready() and not sys.demo.mode then ui.tab = 5 end
-  local lastMaint, lastSave, lastSync = sys.uptime(), sys.uptime(), sys.uptime()
+  local lastMaint, lastSave, lastSync = sys.uptime() - 6, sys.uptime(), sys.uptime()
   while running do
     tick()
     autoRefresh()
@@ -10592,7 +10604,7 @@ local function runSearch()
     else
       diagnosticStage = "Reading wideband detector events"
       phase = diagnosticStage
-      screen(true)
+      screen()
       local evs = wideStep()
       if sys.uptime() - lastMaint > 5 then
         maintain(); updateBases(); lastMaint = sys.uptime()
