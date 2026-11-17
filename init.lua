@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v4.5  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v4.6  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v4.5"
+local VERSION = "ReactOS-OC v4.6"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -1287,13 +1287,15 @@ end
 
 local function runLua(src, name, args)
   local f, e = load(src, "=" .. name, "t", progEnv())
-  if not f then report(e); return end
+  if not f then report(e); return false, tostring(e) end
   local ok, err = pcall(f, table.unpack(args))
   if not ok then
-    if err == "__exit__" then return end
-    if err == "__ctrlc__" then out("^C\n"); return end
+    if err == "__exit__" then return true end
+    if err == "__ctrlc__" then out("^C\n"); return true end
     report(err)
+    return false, tostring(err)
   end
+  return true
 end
 
 local function execScript(a, p)
@@ -8890,6 +8892,7 @@ end
 
 local tick
 local phase = "standby"
+local diagnosticStage = "Preparing application"
 local narrowInfo = nil
 local running = true
 
@@ -10457,16 +10460,24 @@ local function autoRefresh()
 end
 
 local function runSearch()
+  diagnosticStage = "Drawing the initial screen"
   phase = "Starting emission finder..."
   screen(true)
   sys.sleep(0.05)
   if not running then return end
-  phase = "Loading saved finder data..."
+  diagnosticStage = "Loading saved finder data"
+  phase = diagnosticStage .. "..."
   screen(true)
   loadData()
   loadAccum()
   if not running then return end
+  diagnosticStage = "Rebuilding saved search data"
+  phase = diagnosticStage .. "..."
+  screen(true)
   maintain()
+  diagnosticStage = "Checking NTM satellite links"
+  phase = diagnosticStage .. "..."
+  screen(true)
   SAT.map(); lastMap = sys.uptime()
   log("start: WB — %s; NB — %s; spy — %s", tostring(SAT.status.wide),
     tostring(SAT.status.narrow), tostring(SAT.status.spy))
@@ -10476,10 +10487,13 @@ local function runSearch()
     tick()
     autoRefresh()
     if not ready() then
-      phase = "WB and NB required: set frequencies in tab 5 and select CHECK LINK"
+      diagnosticStage = "Waiting for configured WB and NB satellite links"
+      phase = diagnosticStage
       sys.sleep(0.5)
     else
-      phase = "WB · collecting detections"
+      diagnosticStage = "Reading wideband detector events"
+      phase = diagnosticStage
+      screen(true)
       local evs = wideStep()
       if sys.uptime() - lastMaint > 5 then
         maintain(); updateBases(); lastMaint = sys.uptime()
@@ -10567,9 +10581,11 @@ end
 if not ok then
   pcall(saveData)
   if args[1] == nil then pcall(saveAccum) end
-  if not tostring(err):find("interrupted") then
-    log("ERROR: %s", tostring(err))
-    io.stderr:write(tostring(err), "\n")
+  local message = tostring(err)
+  if message ~= "__ctrlc__" and message ~= "__exit__" and not message:find("interrupted", 1, true) then
+    local detail = "Emission Finder failed during " .. diagnosticStage .. ": " .. message
+    log("ERROR: %s", detail)
+    error(detail, 0)
   end
 end
 if rebootNow and sys.oc then
@@ -10615,6 +10631,39 @@ return { clusters = clusters, bases = bases, archive = archive, stats = stats, b
       gpu.set(clockX, taskTop + 1, unicode.sub(liveClock or os.date("%H:%M:%S"), 1, math.min(8, W - clockX + 1)))
       color(BG, FG)
     end
+    local function showAppError(title, reason)
+      klog(title .. " app error: " .. tostring(reason))
+      cls()
+      color(BG, RED); gpu.fill(1, 1, W, H, " ")
+      gpu.set(2, 2, unicode.sub("ReactOS " .. title .. " - Error", 1, math.max(1, W - 4)))
+      color(BG, FG)
+      local y, width = 4, math.max(1, W - 4)
+      local rows = linesOf(tostring(reason))
+      if #rows == 0 then rows = { tostring(reason) } end
+      local clipped = false
+      for _, row in ipairs(rows) do
+        if row == "" then
+          if y <= H - 3 then y = y + 1 end
+        else
+          local line = row
+          while unicode.len(line) > 0 do
+            if y > H - 3 then clipped = true; break end
+            local part = unicode.sub(line, 1, width)
+            gpu.set(2, y, part)
+            line = unicode.sub(line, unicode.len(part) + 1)
+            y = y + 1
+          end
+          if clipped then break end
+        end
+      end
+      if clipped and y <= H - 3 then gpu.set(2, y, "... error details clipped ...") end
+      bar(H, "Press any key or click to return to Desktop", GRAY, BLACK)
+      while true do
+        local kind = waitInput()
+        if kind == "key" or kind == "touch" then break end
+      end
+      cls()
+    end
     local function launch(app)
       activeDesktopApp = appNames[app] or tostring(app)
       if app == "me" then sharedMeApp("")
@@ -10626,7 +10675,7 @@ return { clusters = clusters, bases = bases, archive = archive, stats = stats, b
       elseif app == "rbmk" then launchRbmk()
       elseif app == "fusion" then fusionApp()
       elseif app == "icf" then icfApp()
-      elseif app == "emfind" then runLua(EMFIND_SOURCE, "emfind.lua", {})
+      elseif app == "emfind" then local ok, err = runLua(EMFIND_SOURCE, "emfind.lua", {}); if not ok then showAppError("Emission Finder", err) end
       elseif app == "weather" then weatherTimeApp()
       elseif app == "radar" then ntmComponentApp("ntm_radar", "RADAR")
       elseif app == "gasturbine" then ntmComponentApp("ntm_gas_turbine", "GAS TURBINE")
