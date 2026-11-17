@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v4.4  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v4.5  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v4.4"
+local VERSION = "ReactOS-OC v4.5"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -1135,46 +1135,16 @@ for n in ("string table math coroutine"):gmatch("%a+") do
 end
 
 SHIMS.event = function()
-  local ev, listeners = {}, {}
-  ev.listen = function(name, callback)
-    if type(name) ~= "string" or type(callback) ~= "function" then return nil end
-    local list = listeners[name] or {}
-    listeners[name] = list
-    for _, existing in ipairs(list) do if existing == callback then return true end end
-    list[#list + 1] = callback
-    return true
-  end
-  ev.ignore = function(name, callback)
-    local list = listeners[name]
-    if not list then return false end
-    for i = #list, 1, -1 do
-      if list[i] == callback then table.remove(list, i); return true end
-    end
-    return false
-  end
+  local ev = {}
   ev.pull = function(a1, a2)
     local timeout, name
     if type(a1) == "number" then timeout, name = a1, a2 else name = a1 end
-    local dl = timeout and (computer.uptime() + math.max(0, timeout)) or nil
+    local dl = timeout and (computer.uptime() + timeout) or nil
     while true do
       local left = dl and math.max(0, dl - computer.uptime()) or nil
-      local signal = { n = 0 }
-      local function capture(...)
-        signal.n = select("#", ...)
-        for i = 1, signal.n do signal[i] = select(i, ...) end
-      end
-      capture(pull(left))
-      local e = signal[1]
-      if e then
-        local registered = listeners[e]
-        if registered then
-          local callbacks = {}
-          for i, callback in ipairs(registered) do callbacks[i] = callback end
-          for _, callback in ipairs(callbacks) do pcall(callback, unpackValues(signal, 1, signal.n)) end
-        end
-      end
-      if e == "key_down" and signal[3] == 3 then error("__ctrlc__", 0) end
-      if e and (not name or e == name) then return unpackValues(signal, 1, signal.n) end
+      local e, a, b, c, d = pull(left)
+      if e == "key_down" and b == 3 then error("__ctrlc__", 0) end
+      if e and (not name or e == name) then return e, a, b, c, d end
       if dl and computer.uptime() >= dl then return nil end
     end
   end
@@ -8080,6 +8050,7 @@ local CFG = {
   maxPts       = 400,
   maxPlayers   = 30,
   maxBlasts    = 20,
+  maxEvents    = 128,
   rebootAfter  = 0, -- A desktop app must never reboot the whole computer automatically.
 
   cfgFile      = "/Users/emfind.cfg",
@@ -8359,9 +8330,17 @@ end
 
 local function readEvents(r, typeCmd, filter)
   local n = tonumber(satQuery(r, "count"))
-  if not n then return nil end
+  if not n or n ~= n or n < 0 then return nil end
+  local limit = math.max(1, math.floor(tonumber(CFG.maxEvents) or 128))
+  if n > limit then
+    log("satellite event count exceeded the %d event limit; response was capped", limit)
+    n = limit
+  else
+    n = math.floor(n)
+  end
   local out = {}
   for i = 1, n do
+    if i > 1 and i % 16 == 0 then sys.sleep(0.01) end
     local ty = satQuery(r, typeCmd .. " " .. i)
     if ty and (not filter or filter[ty]) then
       local x, z = parseXZ(satQuery(r, "getposition " .. i))
@@ -10383,6 +10362,7 @@ local queue = {}
 
 local function handleKey(ch, code)
   local c = (ch and ch >= 32 and ch < 127) and string.char(ch) or ""
+  if not ui.dlg and (code == 1 or ch == 27) then doAction("quit"); return end
   if ui.dlg then
     if code == 63 then doAction("refresh")
     elseif code == 28 then
@@ -10423,15 +10403,6 @@ local function handleTouch(x, y)
   end
 end
 
-local function onKey(_, _, ch, code) queue[#queue + 1] = { "key", ch, code } end
-local function onTouch(_, _, x, y) queue[#queue + 1] = { "touch", x, y } end
-local function onScroll(_, _, x, y, dir) queue[#queue + 1] = { "scroll", dir, x, y } end
-if sys.oc then
-  sys.event.listen("key_down", onKey)
-  sys.event.listen("touch", onTouch)
-  sys.event.listen("scroll", onScroll)
-end
-
 serviceInput = function()
   if ui.servicing then return end
   ui.servicing = true
@@ -10457,7 +10428,11 @@ if sys.oc then
       serviceInput()
       local left = untilAt - sys.uptime()
       if left <= 0 then break end
-      sys.event.pull(math.min(left, 0.05))
+      local eventName, _, p1, p2, p3 = sys.event.pull(math.min(left, 0.05))
+      if eventName == "key_down" then handleKey(p1, p2)
+      elseif eventName == "touch" then handleTouch(p1, p2)
+      elseif eventName == "scroll" then queue[#queue + 1] = { "scroll", p3, p1, p2 } end
+      serviceInput()
     until false
   end
 end
@@ -10482,8 +10457,15 @@ local function autoRefresh()
 end
 
 local function runSearch()
+  phase = "Starting emission finder..."
+  screen(true)
+  sys.sleep(0.05)
+  if not running then return end
+  phase = "Loading saved finder data..."
+  screen(true)
   loadData()
   loadAccum()
+  if not running then return end
   maintain()
   SAT.map(); lastMap = sys.uptime()
   log("start: WB — %s; NB — %s; spy — %s", tostring(SAT.status.wide),
@@ -10575,9 +10557,6 @@ local ok, err = pcall(function()
   else runSearch() end
 end)
 if sys.oc then
-  sys.event.ignore("key_down", onKey)
-  sys.event.ignore("touch", onTouch)
-  sys.event.ignore("scroll", onScroll)
   screenCleanup()
   if gpu then
     gpu.setBackground(0x000000); gpu.setForeground(0xFFFFFF)
