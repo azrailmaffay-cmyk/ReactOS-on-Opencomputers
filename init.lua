@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v5.2  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v5.3  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v5.2"
+local VERSION = "ReactOS-OC v5.3"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -7597,6 +7597,26 @@ end
         add("AUTOMATIC MODE", auto and (auto[1] and "ON" or "OFF") or "--")
         d.status = state and tonumber(state[1]) ~= nil and (stateNames[tonumber(state[1])] or "ONLINE") or "NO DATA"
         d.summary = "GAS  " .. tostring(gas and gas[1] or "UNKNOWN") .. "   |   POWER  " .. fmt(power and power[1]) .. " HE"
+      elseif kind == "ntm_pa_source" then
+        local energy, coolant = call(address, "getEnergyInfo"), call(address, "getCoolant")
+        local momentum, state = call(address, "getMomentum"), call(address, "getState")
+        local crafting = call(address, "getCrafting")
+        add("ACCELERATOR STATE", state and tostring(state[1]) or "NO DATA")
+        add("PARTICLE MOMENTUM", fmt(momentum and momentum[1]))
+        add("ENERGY BUFFER", fmt(energy and energy[1]) .. " / " .. fmt(energy and energy[2]) .. " HE", energy and energy[1], energy and energy[2], "HE")
+        add("COLD COOLANT", fmt(coolant and coolant[1]) .. " / " .. fmt(coolant and coolant[2]) .. " mB", coolant and coolant[1], coolant and coolant[2], "mB")
+        add("HOT COOLANT", fmt(coolant and coolant[3]) .. " / " .. fmt(coolant and coolant[4]) .. " mB", coolant and coolant[3], coolant and coolant[4], "mB")
+        if crafting then for i = 1, 4 do detail("SLOT " .. i .. "  " .. tostring(crafting[i * 2 - 1] or "EMPTY") .. "  ×" .. fmt(crafting[i * 2])) end end
+        d.status = state and tostring(state[1]) or "NO DATA"
+        d.summary = "MOMENTUM  " .. fmt(momentum and momentum[1]) .. "   |   ENERGY  " .. fmt(energy and energy[1]) .. " HE"
+      elseif kind == "ntm_energy_storage" or kind == "ntm_energy_storage_legacy" then
+        local energy = call(address, "getEnergyInfo")
+        local pack = kind == "ntm_energy_storage" and call(address, "getPackInfo") or nil
+        add("STORED ENERGY", fmt(energy and energy[1]) .. " / " .. fmt(energy and energy[2]) .. " HE", energy and energy[1], energy and energy[2], "HE")
+        add("POWER FLOW", (energy and energy[3] ~= nil) and (fmt(energy[3]) .. " HE/s") or "--")
+        if pack then add("BATTERY PACK", pack[1] or "EMPTY"); add("CHARGE RATE", fmt(pack[2]) .. " HE/t"); add("DISCHARGE RATE", fmt(pack[3]) .. " HE/t") end
+        d.status = energy and "ONLINE" or "NO DATA"
+        d.summary = "BATTERY BUFFER  " .. fmt(energy and energy[1]) .. " HE"
       end
       if #d.rows > 0 and d.status == "NO DATA" then d.status = "ONLINE" end
       snapshots[address] = d
@@ -7913,7 +7933,6 @@ end
       { name = "RBMK Console", box = 0x802020, glyph = "RBMK", fg = 0xFFFFFF, app = "rbmk" },
       { name = "Fusion Monitor", box = 0x205868, glyph = "FUSION", fg = 0xFFFFFF, app = "fusion" },
       { name = "ICF Control", box = 0x905030, glyph = "ICF", fg = 0xFFFFFF, app = "icf" },
-      { name = "Emission Finder", box = 0x704080, glyph = "EMF", fg = 0xFFFFFF, app = "emfind" },
       { name = "Weather & Time", box = 0x207080, glyph = "WX", fg = 0xFFFFFF, app = "weather" },
       { name = "ReactX", box = 0x203878, glyph = "DX", fg = 0xFFFFFF, app = "reactx" },
       { name = "ReactSLI", box = 0x604080, glyph = "SLI", fg = 0xFFFFFF, app = "reactsli" },
@@ -7922,6 +7941,7 @@ end
     local componentsToApps = {
       { "ntm_radar", "Radar", 0x805020, "RADAR", "radar" },
       { "ntm_gas_turbine", "Gas Turbine", 0x306040, "GAS", "gasturbine" },
+      { "ntm_pa_source", "Particle Accelerator", 0x206080, "PARTICLE", "particle" },
     }
     if cfg.ntmspace == "1" then
       componentsToApps[#componentsToApps + 1] = { "ntm_atmospheric_vent", "Atmospheric Vent", 0x207080, "VENT", "vent" }
@@ -7930,6 +7950,9 @@ end
     end
     for _, app in ipairs(componentsToApps) do
       if #componentAddresses(app[1]) > 0 then icons[#icons + 1] = { name = app[2], box = app[3], glyph = app[4], fg = 0xFFFFFF, app = app[5] } end
+    end
+    if #componentAddresses("ntm_energy_storage") > 0 or #componentAddresses("ntm_energy_storage_legacy") > 0 then
+      icons[#icons + 1] = { name = "Battery Power", box = 0x206850, glyph = "BATTERY", fg = 0xFFFFFF, app = "battery" }
     end
     icons[#icons + 1] = { name = "Music Player", box = 0x803060, glyph = "MUSIC", fg = 0xFFFFFF, app = "music" }
     icons[#icons + 1] = { name = "Gallery", box = 0x703060, glyph = "PHOTO", fg = 0xFFFFFF, app = "gallery" }
@@ -7941,7 +7964,7 @@ end
     local items = {
       { label = "ME Storage", app = "me" }, { label = "RBMK Console", app = "rbmk" },
       { label = "Fusion Monitor", app = "fusion" },
-      { label = "ICF Control", app = "icf" }, { label = "Emission Finder", app = "emfind" },
+      { label = "ICF Control", app = "icf" },
       { label = "Weather & Time", app = "weather" },
       { label = "ReactX", app = "reactx" }, { label = "ReactSLI", app = "reactsli" },
       { label = "Settings", app = "settings" }, { label = "Notepad", app = "notepad" },
@@ -7950,6 +7973,7 @@ end
     }
     local componentsToApps = {
       { "ntm_radar", "Radar", "radar" }, { "ntm_gas_turbine", "Gas Turbine", "gasturbine" },
+      { "ntm_pa_source", "Particle Accelerator", "particle" },
     }
     if cfg.ntmspace == "1" then
       componentsToApps[#componentsToApps + 1] = { "ntm_atmospheric_vent", "Atmospheric Vent", "vent" }
@@ -7957,6 +7981,9 @@ end
       componentsToApps[#componentsToApps + 1] = { "ntm_rocket_pad", "Rocket Pad", "rocketpad" }
     end
     for _, entry in ipairs(componentsToApps) do if #componentAddresses(entry[1]) > 0 then items[#items + 1] = { label = entry[2], app = entry[3] } end end
+    if #componentAddresses("ntm_energy_storage") > 0 or #componentAddresses("ntm_energy_storage_legacy") > 0 then
+      items[#items + 1] = { label = "Battery Power", app = "battery" }
+    end
     if cfg.rsviewer == "1" then table.insert(items, 2, { label = "RS Storage", app = "rs" }) end
     items[#items + 1] = { label = "Reboot", app = "reboot" }
     items[#items + 1] = { label = "Shut Down", app = "shutdown" }
@@ -8015,7 +8042,7 @@ end
   end
 
   local EMFIND_SOURCE = [====[
--- ReactOS Emission Finder v5.2
+-- ReactOS Emission Finder v5.3
 local CFG = {
   acc          = { LOW = 10000, MEDIUM = 2500, HIGH = 500 },
   wantTypes    = { MEDIUM = true, HIGH = true },
@@ -10746,7 +10773,7 @@ return { clusters = clusters, bases = bases, archive = archive, stats = stats, b
     local hits, startBtn, done, ICONS = {}, nil, false, nil
     local appNames = {
       me = "ME Storage", rs = "RS Storage", settings = "Settings", notepad = "Notepad",
-      terminal = "Terminal", rbmk = "RBMK Console", fusion = "Fusion Monitor", icf = "ICF Control", weather = "Weather & Time", radar = "NTM Radar", gasturbine = "Gas Turbine", vent = "Atmospheric Vent", stardar = "Stardar", rocketpad = "Rocket Pad", reactx = "ReactX", reactsli = "ReactSLI", music = "Music Player",
+      terminal = "Terminal", rbmk = "RBMK Console", fusion = "Fusion Monitor", icf = "ICF Control", weather = "Weather & Time", radar = "NTM Radar", gasturbine = "Gas Turbine", vent = "Atmospheric Vent", stardar = "Stardar", rocketpad = "Rocket Pad", particle = "Particle Accelerator", battery = "Battery Power", reactx = "ReactX", reactsli = "ReactSLI", music = "Music Player",
       gallery = "Gallery", messages = "Messages", credits = "Credits", emfind = "Emission Finder",
     }
     local function draw()
@@ -10829,6 +10856,9 @@ return { clusters = clusters, bases = bases, archive = archive, stats = stats, b
       elseif app == "vent" then ntmComponentApp("ntm_atmospheric_vent", "ATMOSPHERIC VENT")
       elseif app == "stardar" then ntmComponentApp("ntm_stardar", "STARDAR")
       elseif app == "rocketpad" then ntmComponentApp("ntm_rocket_pad", "ROCKET PAD")
+      elseif app == "particle" then ntmComponentApp("ntm_pa_source", "PARTICLE ACCELERATOR")
+      elseif app == "battery" then
+        ntmComponentApp(#componentAddresses("ntm_energy_storage") > 0 and "ntm_energy_storage" or "ntm_energy_storage_legacy", "BATTERY POWER")
       elseif app == "reactx" then sharedReactXApp()
       elseif app == "reactsli" then sharedReactSliApp()
       elseif app == "settings" then settingsApp()
