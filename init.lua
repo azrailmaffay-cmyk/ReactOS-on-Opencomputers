@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v5.5  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v5.6  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v5.5"
+local VERSION = "ReactOS-OC v5.6"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -7855,18 +7855,6 @@ end
   end
 
   local sharedInternetClock
-  local function syncInternetClock()
-    local zone = cfg.weatherTZ or "Europe/Istanbul"
-    local started = computer.uptime()
-    local body = httpGet("https://timeapi.io/api/Time/current/zone?timeZone=" .. (tostring(zone):gsub("[^%w%-_%.~/]", function(c) return string.format("%%%02X", c:byte()) end)))
-    local finished = computer.uptime()
-    if not body then return false end
-    local function number(key) return tonumber(body:match('"' .. key .. '"%s*:%s*(-?[%d%.]+)')) end
-    local clock = { year=number("year"), month=number("month"), day=number("day"), hour=number("hour"), minute=number("minute"), second=number("seconds"), zone=body:match('"timeZone"%s*:%s*"([^"\\]*)"'), uptime=(started + finished) / 2 }
-    if not (clock.year and clock.month and clock.day and clock.hour and clock.minute and clock.second) then return false end
-    sharedInternetClock = clock
-    return true
-  end
   local function internetClockText()
     local anchor = sharedInternetClock
     if not anchor then return nil end
@@ -8038,29 +8026,28 @@ end
       put(2, H - 2, message ~= "" and message or "Open-Meteo weather | TimeAPI timezone clock", failed and RED or GREEN, 0x0A1218, W - 4)
       color(GRAY, BLACK); gpu.fill(1, H, W, 1, " "); gpu.set(2, H, "S / TAP LOCATION: SEARCH   R: REFRESH   Q: CLOSE")
     end
-    refresh(); draw(); local nextRefresh, nextClockDraw = computer.uptime() + 60, computer.uptime() + 1
+    refresh(); draw(); local nextClockDraw = computer.uptime() + 1
     while true do
       local e, _, ch, code = pull(0.2)
       if e == "key_down" then
         if searching then
           if ch == 27 or code == 1 then searching, query, suggestions, searchDeadline = false, "", {}, nil; failed = false; draw()
-          elseif ch == 13 then if suggestions[highlighted] then selectLocation(suggestions[highlighted]); refresh(); nextRefresh = computer.uptime() + 60 end; draw()
+          elseif ch == 13 then if suggestions[highlighted] then selectLocation(suggestions[highlighted]); refresh() end; draw()
           elseif code == 200 then highlighted = math.max(1, highlighted - 1); draw()
           elseif code == 208 then highlighted = math.min(#suggestions, highlighted + 1); draw()
           elseif code == 14 or ch == 8 then query = unicode.sub(query, 1, math.max(0, unicode.len(query) - 1)); suggestions = {}; failed = false; searchDeadline = computer.uptime() + 0.45; draw()
           elseif ch and ch >= 32 and unicode.len(query) < 60 then local ok, char = pcall(unicode.char, ch); if ok and char then query = query .. char; suggestions = {}; failed = false; searchDeadline = computer.uptime() + 0.45; draw() end end
         elseif ch == 113 or ch == 81 or ch == 27 or code == 1 then cls(); return
-        elseif ch == 114 or ch == 82 then refresh(); nextRefresh = computer.uptime() + 60; draw()
+        elseif ch == 114 or ch == 82 then refresh(); draw()
         elseif ch == 115 or ch == 83 then searching, query, suggestions, highlighted = true, "", {}, 1; failed = false; draw() end
       elseif e == "touch" and not searching and code == 4 then
         searching, query, suggestions, highlighted = true, "", {}, 1; failed = false; draw()
       elseif e == "touch" and searching and code >= 7 and code <= 7 + math.min(#suggestions, math.max(1, H - 9)) - 1 then
         local chosen = suggestions[code - 7 + 1]
-        if chosen then selectLocation(chosen); refresh(); nextRefresh = computer.uptime() + 60; draw() end
+        if chosen then selectLocation(chosen); refresh(); draw() end
       end
       if searching and searchDeadline and computer.uptime() >= searchDeadline then updateSuggestions(); draw() end
-      if computer.uptime() >= nextRefresh then refresh(); nextRefresh = computer.uptime() + 60; nextClockDraw = computer.uptime() + 1; draw()
-      elseif not searching and computer.uptime() >= nextClockDraw then draw(); nextClockDraw = computer.uptime() + 1 end
+      if not searching and computer.uptime() >= nextClockDraw then draw(); nextClockDraw = computer.uptime() + 1 end
     end
   end
 
@@ -11018,9 +11005,8 @@ return { clusters = clusters, bases = bases, archive = archive, stats = stats, b
       elseif app == "shutdown" then computer.shutdown() end
     end
     activeDesktopApp = "Desktop"
-    syncInternetClock()
     draw()
-    local nextClockDraw, nextClockSync = computer.uptime() + 1, computer.uptime() + 60
+    local nextClockDraw = computer.uptime() + 1
     while not done do
       local kind, a, b = waitInput(0.2)
       local app
@@ -11040,9 +11026,7 @@ return { clusters = clusters, bases = bases, archive = archive, stats = stats, b
         end
       end
       if app then launch(app); if not done then draw() end end
-      if not done and computer.uptime() >= nextClockSync then
-        syncInternetClock(); nextClockSync = computer.uptime() + 60; draw(); nextClockDraw = computer.uptime() + 1
-      elseif not done and computer.uptime() >= nextClockDraw then
+      if not done and computer.uptime() >= nextClockDraw then
         draw(); nextClockDraw = computer.uptime() + 1
       end
     end
