@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v5.3  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v5.4  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v5.3"
+local VERSION = "ReactOS-OC v5.4"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -7479,7 +7479,30 @@ end
         d.rows[#d.rows + 1] = { label, tostring(value or "--"), tonumber(amount), tonumber(maximum), unit or "" }
       end
       local function detail(value) d.details[#d.details + 1] = tostring(value) end
-      if kind == "ntm_atmospheric_vent" then
+      if kind == "reactos_battery_combined" then
+        local addresses = componentAddresses("ntm_energy_storage")
+        for _, batteryAddress in ipairs(componentAddresses("ntm_energy_storage_legacy")) do addresses[#addresses + 1] = batteryAddress end
+        local stored, capacity, delta, count = 0, 0, 0, 0
+        local hasDelta = false
+        for _, batteryAddress in ipairs(addresses) do
+          local energy = call(batteryAddress, "getEnergyInfo")
+          local amount, maximum = tonumber(energy and energy[1]), tonumber(energy and energy[2])
+          if amount and maximum and maximum > 0 then
+            stored, capacity, count = stored + amount, capacity + maximum, count + 1
+            if tonumber(energy[3]) then delta, hasDelta = delta + energy[3], true end
+            local pack = call(batteryAddress, "getPackInfo")
+            detail(string.format("%s  %s / %s HE  ·  %d%%", batteryAddress:sub(1, 8), fmt(amount), fmt(maximum), math.floor(100 * amount / maximum + 0.5)))
+            if pack and pack[1] then detail("PACK " .. tostring(pack[1]) .. " · CHARGE " .. fmt(pack[2]) .. " · DISCHARGE " .. fmt(pack[3]) .. " HE/t") end
+          end
+        end
+        local average = capacity > 0 and stored / capacity or nil
+        add("COMBINED CHARGE", capacity > 0 and (fmt(stored) .. " / " .. fmt(capacity) .. " HE") or "NO BATTERIES", stored, capacity, "HE")
+        add("AVERAGE BATTERY LEVEL", average and (fmt(average * 100) .. "%") or "--", stored, capacity, "%")
+        add("TOTAL POWER FLOW", hasDelta and (fmt(delta) .. " HE/s") or "--")
+        add("CONNECTED BATTERIES", tostring(count))
+        d.status = count > 0 and "ONLINE" or "NO BATTERIES FOUND"
+        d.summary = capacity > 0 and string.format("AVERAGE CHARGE  %d%%  ·  %s / %s HE", math.floor(100 * stored / capacity + 0.5), fmt(stored), fmt(capacity)) or "Connect battery storage components"
+      elseif kind == "ntm_atmospheric_vent" then
         local fluid, atmosphere, sealed = call(address, "getFluid"), call(address, "getAtmosphereDetails"), call(address, "isSealed")
         add("OXYGEN BUFFER", fmt(fluid and fluid[1]) .. " / " .. fmt(fluid and fluid[2]) .. " mB", fluid and fluid[1], fluid and fluid[2], "mB")
         add("ATMOSPHERE", sealed and (sealed[1] and "SEALED" or "UNSEALED") or "--")
@@ -7623,7 +7646,7 @@ end
     end
     local function refresh()
       local keep = devices[selected]
-      devices = componentAddresses(kind)
+      devices = kind == "reactos_battery_combined" and { "ALL BATTERIES" } or componentAddresses(kind)
       selected = 1
       for i, address in ipairs(devices) do if address == keep then selected = i end; read(address) end
     end
@@ -8042,7 +8065,7 @@ end
   end
 
   local EMFIND_SOURCE = [====[
--- ReactOS Emission Finder v5.3
+-- ReactOS Emission Finder v5.4
 local CFG = {
   acc          = { LOW = 10000, MEDIUM = 2500, HIGH = 500 },
   wantTypes    = { MEDIUM = true, HIGH = true },
@@ -10858,7 +10881,7 @@ return { clusters = clusters, bases = bases, archive = archive, stats = stats, b
       elseif app == "rocketpad" then ntmComponentApp("ntm_rocket_pad", "ROCKET PAD")
       elseif app == "particle" then ntmComponentApp("ntm_pa_source", "PARTICLE ACCELERATOR")
       elseif app == "battery" then
-        ntmComponentApp(#componentAddresses("ntm_energy_storage") > 0 and "ntm_energy_storage" or "ntm_energy_storage_legacy", "BATTERY POWER")
+        ntmComponentApp("reactos_battery_combined", "BATTERY POWER")
       elseif app == "reactx" then sharedReactXApp()
       elseif app == "reactsli" then sharedReactSliApp()
       elseif app == "settings" then settingsApp()
