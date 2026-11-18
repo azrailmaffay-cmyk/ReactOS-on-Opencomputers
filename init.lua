@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v4.9  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v5.0  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v4.9"
+local VERSION = "ReactOS-OC v5.0"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -8015,7 +8015,7 @@ end
   end
 
   local EMFIND_SOURCE = [====[
--- ReactOS Emission Finder v4.9
+-- ReactOS Emission Finder v5.0
 local CFG = {
   acc          = { LOW = 10000, MEDIUM = 2500, HIGH = 500 },
   wantTypes    = { MEDIUM = true, HIGH = true },
@@ -8506,12 +8506,14 @@ local function trySplit(c)
   local a = farthest(c.pts, c.cx, c.cz)
   local b = farthest(c.pts, a.x, a.z)
   local ax, az, bx, bz = a.x, a.z, b.x, b.z
-  local ga, gb
+  local ga, gb, work = nil, nil, 0
   for _ = 1, 10 do
     ga, gb = {}, {}
     for _, p in ipairs(c.pts) do
       if (p.x - ax) ^ 2 + (p.z - az) ^ 2 <= (p.x - bx) ^ 2 + (p.z - bz) ^ 2
         then ga[#ga + 1] = p else gb[#gb + 1] = p end
+      work = work + 1
+      if work >= 128 then work = 0; if sys.oc and sys.yieldInput then sys.yieldInput() end end
     end
     if #ga == 0 or #gb == 0 then return false end
     local sx, sz = 0, 0
@@ -8542,11 +8544,17 @@ end
 
 local function maintain()
   local t = now()
-  for k, v in pairs(seen) do if t - v > 61 then seen[k] = nil end end
+  local work = 0
+  local function yieldWork()
+    work = work + 1
+    if work >= 128 then work = 0; if sys.oc and sys.yieldInput then sys.yieldInput() end end
+  end
+  for k, v in pairs(seen) do if t - v > 61 then seen[k] = nil end; yieldWork() end
   local all = {}
   for _, c in ipairs(clusters) do
     for _, p in ipairs(c.pts) do
       if t - p.t <= CFG.sampleTTL then p.ty = c.type; all[#all + 1] = p end
+      yieldWork()
     end
     c.pts = {}
   end
@@ -8554,22 +8562,26 @@ local function maintain()
   for _, p in ipairs(all) do
     local c = homeFor(p.ty, p.x, p.z, false)
     if c then c.pts[#c.pts + 1] = p else orphans[#orphans + 1] = p end
+    yieldWork()
   end
   for i = #clusters, 1, -1 do
     local c = clusters[i]
     recompute(c)
     if c.n == 0 and not c.pin then table.remove(clusters, i) end
+    yieldWork()
   end
   for _, p in ipairs(orphans) do
     local c = homeFor(p.ty, p.x, p.z, true) or newCluster(p.ty)
     c.pts[#c.pts + 1] = p
     recompute(c)
+    yieldWork()
   end
   for _, c in ipairs(clusters) do
     if c.state == "lost" and t - (c.lostAt or t) > CFG.lostRetry then
       c.state, c.misses, c.lostAt = "collect", 0, nil
       c.needN = math.max(CFG.minSamples, c.n)
     end
+    yieldWork()
   end
   local merged = true
   while merged do
@@ -8594,6 +8606,7 @@ local function maintain()
             break
           end
         end
+        yieldWork()
       end
       if merged then break end
     end
@@ -8843,7 +8856,7 @@ local function loadAccum()
   local t = loadTable(CFG.accumFile)
   os.remove(CFG.accumFile)
   if not t or type(t.clusters) ~= "table" then return end
-  local n = 0
+  local n, work = 0, 0
   for _, o in ipairs(t.clusters) do
     if CFG.acc[o.type] then
       local c = newCluster(o.type)
@@ -8853,10 +8866,14 @@ local function loadAccum()
         c.state, c.misses, c.needN, c.lostAt = o.state or "collect", o.misses or 0, o.needN or CFG.minSamples, o.lostAt
         for _, p in ipairs(o.pts or {}) do
           if tonumber(p.x) and tonumber(p.z) and tonumber(p.t) then c.pts[#c.pts + 1] = { x = p.x, z = p.z, t = p.t } end
+          work = work + 1
+          if work >= 128 then work = 0; if sys.oc and sys.yieldInput then sys.yieldInput() end end
         end
         recompute(c)
         n = n + #c.pts
       end
+    work = work + 1
+    if work >= 128 then work = 0; if sys.oc and sys.yieldInput then sys.yieldInput() end end
     end
   end
   if n > 0 then log("restored detections: %d", n) end
@@ -8881,7 +8898,10 @@ local function loadData()
   end
   for _, b in ipairs(archive) do nextBaseId = math.max(nextBaseId, b.id + 1) end
   indexBases()
-  for _, b in ipairs(bases) do pinSourcesOf(b); pinWpins(b) end
+  for i, b in ipairs(bases) do
+    pinSourcesOf(b); pinWpins(b)
+    if i % 8 == 0 and sys.oc and sys.yieldInput then sys.yieldInput() end
+  end
 end
 
 local function applyTerritory()
@@ -10521,6 +10541,12 @@ if sys.oc then
       serviceInput()
     until false
   end
+  sys.yieldInput = function()
+    local eventName, _, p1, p2, p3 = sys.event.pull(0)
+    if eventName == "key_down" then handleKey(p1, p2)
+    elseif eventName == "touch" then handleTouch(p1, p2)
+    elseif eventName == "scroll" then queue[#queue + 1] = { "scroll", p3, p1, p2 } end
+  end
 end
 
 tick = function()
@@ -10533,7 +10559,7 @@ tick = function()
   screen()
 end
 
-local function autoRefresh()
+function sys.autoRefresh()
   if sys.demo.mode then return end
   for _, r in ipairs(ROLES) do
     if S.freq[r] and not SAT.ok[r] then
@@ -10543,7 +10569,7 @@ local function autoRefresh()
   end
 end
 
-local function runSearch()
+function sys.runSearch()
   diagnosticStage = "Drawing the initial screen"
   phase = "Starting emission finder..."
   screen(true)
@@ -10591,7 +10617,7 @@ local function runSearch()
   local lastMaint, lastSave, lastSync = sys.uptime() - 6, sys.uptime(), sys.uptime()
   while running do
     tick()
-    autoRefresh()
+    sys.autoRefresh()
     if sys.demo.mode then
       diagnosticStage = "Running simulated readings — no satellite scan"
       phase = "DEMO MODE · SIMULATED DATA ONLY"
@@ -10641,7 +10667,7 @@ local function runSearch()
   end
 end
 
-local function runProbe(X, Z)
+function sys.runProbe(X, Z)
   SAT.map()
   for _, r in ipairs(ROLES) do print(ROLE_NAME[r] .. ": " .. tostring(SAT.status[r])) end
   if not SAT.ok.narrow then return end
@@ -10650,7 +10676,7 @@ local function runProbe(X, Z)
   for _, e in ipairs(found) do print(string.format("  %s  %d;%d", e.t, e.x, e.z)) end
 end
 
-local function runCalib(X, Z, dur)
+function sys.runCalib(X, Z, dur)
   SAT.map()
   if not SAT.ok.wide then print("WB: " .. tostring(SAT.status.wide)) return end
   local xs, zs, t0, edge, n = {}, {}, sys.uptime(), 0, 0
@@ -10679,9 +10705,9 @@ local function runCalib(X, Z, dur)
 end
 
 local ok, err = pcall(function()
-  if args[1] == "probe" then runProbe(tonumber(args[2]) or 0, tonumber(args[3]) or 0)
-  elseif args[1] == "calib" then runCalib(tonumber(args[2]) or 0, tonumber(args[3]) or 0, tonumber(args[4]) or 300)
-  else runSearch() end
+  if args[1] == "probe" then sys.runProbe(tonumber(args[2]) or 0, tonumber(args[3]) or 0)
+  elseif args[1] == "calib" then sys.runCalib(tonumber(args[2]) or 0, tonumber(args[3]) or 0, tonumber(args[4]) or 300)
+  else sys.runSearch() end
 end)
 if sys.oc then
   screenCleanup()
