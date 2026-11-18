@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v5.4  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v5.5  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v5.4"
+local VERSION = "ReactOS-OC v5.5"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -7462,6 +7462,17 @@ end
     local devices, snapshots, tabs = {}, {}, {}
     local planetByDevice = {}
     local selected, page = 1, 1
+    local isBatteryApp = kind == "reactos_battery_combined"
+    local batteryStats = { stored = 0, capacity = 0, count = 0, flow = 0, hasFlow = false }
+    local remotePeers, networkEnabled, networkStatus = {}, false, "NETWORK OFF"
+    local networkPort, networkProtocol = 48371, "REACTOS_BATTERY_V1"
+    local modemAddresses, dataAddresses, openedPorts = {}, {}, {}
+    local nodeId = "REACTOS-OC"
+    if isBatteryApp then
+      modemAddresses, dataAddresses = componentAddresses("modem"), componentAddresses("data")
+      local ok, address = pcall(computer.address)
+      if ok and type(address) == "string" then nodeId = address end
+    end
     local function call(address, method, ...)
       local values = {}
       local args = { ... }
@@ -7495,13 +7506,29 @@ end
             if pack and pack[1] then detail("PACK " .. tostring(pack[1]) .. " · CHARGE " .. fmt(pack[2]) .. " · DISCHARGE " .. fmt(pack[3]) .. " HE/t") end
           end
         end
-        local average = capacity > 0 and stored / capacity or nil
-        add("COMBINED CHARGE", capacity > 0 and (fmt(stored) .. " / " .. fmt(capacity) .. " HE") or "NO BATTERIES", stored, capacity, "HE")
-        add("AVERAGE BATTERY LEVEL", average and (fmt(average * 100) .. "%") or "--", stored, capacity, "%")
-        add("TOTAL POWER FLOW", hasDelta and (fmt(delta) .. " HE/s") or "--")
-        add("CONNECTED BATTERIES", tostring(count))
-        d.status = count > 0 and "ONLINE" or "NO BATTERIES FOUND"
-        d.summary = capacity > 0 and string.format("AVERAGE CHARGE  %d%%  ·  %s / %s HE", math.floor(100 * stored / capacity + 0.5), fmt(stored), fmt(capacity)) or "Connect battery storage components"
+        batteryStats = { stored = stored, capacity = capacity, count = count, flow = delta, hasFlow = hasDelta }
+        local totalStored, totalCapacity, totalFlow, totalCount, peerCount = stored, capacity, delta, count, 0
+        local now = computer.uptime()
+        for id, peer in pairs(remotePeers) do
+          if networkEnabled and now - peer.seen <= 15 then
+            totalStored, totalCapacity = totalStored + peer.stored, totalCapacity + peer.capacity
+            totalCount, peerCount = totalCount + peer.count, peerCount + 1
+            if peer.hasFlow then totalFlow, hasDelta = totalFlow + peer.flow, true end
+            detail(string.format("REMOTE %s  %s / %s HE  ·  %d UNITS", id:sub(1, 8), fmt(peer.stored), fmt(peer.capacity), peer.count))
+          else remotePeers[id] = nil end
+        end
+        local average = totalCapacity > 0 and totalStored / totalCapacity or nil
+        add("COMBINED CHARGE", totalCapacity > 0 and (fmt(totalStored) .. " / " .. fmt(totalCapacity) .. " HE") or "NO BATTERIES", totalStored, totalCapacity, "HE")
+        add("AVERAGE BATTERY LEVEL", average and (fmt(average * 100) .. "%") or "--", totalStored, totalCapacity, "%")
+        add("TOTAL POWER FLOW", hasDelta and (fmt(totalFlow) .. " HE/s") or "--")
+        add("CONNECTED BATTERIES", tostring(totalCount))
+        add("REMOTE SERVERS", tostring(peerCount))
+        d.status = totalCount > 0 and "ONLINE" or "NO BATTERIES FOUND"
+        if networkEnabled then networkStatus = "SHARING ON · " .. peerCount .. " PEERS" end
+        d.summary = totalCapacity > 0 and string.format("AVERAGE %d%%  ·  LOCAL %d UNITS + %d PEERS", math.floor(100 * totalStored / totalCapacity + 0.5), count, peerCount) or (networkStatus .. "  ·  Connect battery storage components")
+        detail("LOCAL SERVER " .. nodeId:sub(1, 12) .. "  ·  " .. networkStatus)
+        detail("NETWORK USES MODEM + DATA CARD CHECKSUM · READ-ONLY TELEMETRY")
+        detail("OPEN THIS APP ON EACH SERVER TO SHARE ITS LOCAL BATTERIES")
       elseif kind == "ntm_atmospheric_vent" then
         local fluid, atmosphere, sealed = call(address, "getFluid"), call(address, "getAtmosphereDetails"), call(address, "isSealed")
         add("OXYGEN BUFFER", fmt(fluid and fluid[1]) .. " / " .. fmt(fluid and fluid[2]) .. " mB", fluid and fluid[1], fluid and fluid[2], "mB")
@@ -7650,12 +7677,94 @@ end
       selected = 1
       for i, address in ipairs(devices) do if address == keep then selected = i end; read(address) end
     end
+    local function networkCardCall(address, method, ...)
+      local values = call(address, method, ...)
+      return values and values[1]
+    end
+    local function packetPayload(text)
+      local card = dataAddresses[1]
+      if not card or #text > 256 then return nil end
+      local encoded = networkCardCall(card, "encode64", text)
+      local checksum = networkCardCall(card, "crc32", text)
+      if type(encoded) ~= "string" or type(checksum) ~= "string" then return nil end
+      return encoded, checksum
+    end
+    local function broadcastPacket(text)
+      local encoded, checksum = packetPayload(text)
+      if not encoded then networkStatus = "DATA CARD ERROR"; return false end
+      local sent = false
+      for _, modem in ipairs(modemAddresses) do
+        local result = call(modem, "broadcast", networkPort, networkProtocol, encoded, checksum)
+        if result and result[1] then sent = true end
+      end
+      return sent
+    end
+    local function sendBatteryReport(remoteAddress)
+      local flow = batteryStats.hasFlow and tostring(math.floor(batteryStats.flow)) or "NA"
+      local text = table.concat({ "DATA", nodeId, math.floor(batteryStats.stored), math.floor(batteryStats.capacity), batteryStats.count, flow }, "|")
+      local encoded, checksum = packetPayload(text)
+      if not encoded then networkStatus = "DATA CARD ERROR"; return end
+      for _, modem in ipairs(modemAddresses) do
+        local result = call(modem, "send", remoteAddress, networkPort, networkProtocol, encoded, checksum)
+        if result and result[1] then break end
+      end
+    end
+    local function requestRemoteReports()
+      if not networkEnabled then return end
+      broadcastPacket("GET|" .. nodeId)
+    end
+    local function setNetwork(enabled)
+      if not enabled then
+        networkEnabled = false
+        for _, modem in ipairs(modemAddresses) do
+          if openedPorts[modem] then call(modem, "close", networkPort); openedPorts[modem] = nil end
+        end
+        remotePeers = {}
+        networkStatus = "NETWORK OFF"
+        return
+      end
+      modemAddresses, dataAddresses = componentAddresses("modem"), componentAddresses("data")
+      if #modemAddresses == 0 then networkStatus = "NO NETWORK CARD"; return end
+      if #dataAddresses == 0 then networkStatus = "NO DATA CARD"; return end
+      networkEnabled = true
+      local listening = 0
+      for _, modem in ipairs(modemAddresses) do
+        local wasOpen = networkCardCall(modem, "isOpen", networkPort) == true
+        local opened = networkCardCall(modem, "open", networkPort) == true
+        if wasOpen or opened then listening = listening + 1; openedPorts[modem] = not wasOpen end
+      end
+      if listening == 0 then networkEnabled = false; networkStatus = "MODEM PORT UNAVAILABLE"; return end
+      networkStatus = "SHARING ON · " .. listening .. " MODEM"
+      requestRemoteReports()
+    end
+    local function receiveNetworkPacket(remoteAddress, incomingPort, protocol, encoded, checksum)
+      if not networkEnabled or incomingPort ~= networkPort or protocol ~= networkProtocol or type(encoded) ~= "string" or type(checksum) ~= "string" then return false end
+      local card = dataAddresses[1]
+      if not card then networkStatus = "NO DATA CARD"; return false end
+      local decoded = networkCardCall(card, "decode64", encoded)
+      if type(decoded) ~= "string" or #decoded > 256 then return false end
+      local actualChecksum = networkCardCall(card, "crc32", decoded)
+      if type(actualChecksum) ~= "string" or actualChecksum ~= checksum then return false end
+      local op, id = decoded:match("^([^|]+)|([^|]+)$")
+      if op == "GET" and id and id ~= nodeId then sendBatteryReport(remoteAddress); return true end
+      local dataOp, dataId, stored, capacity, count, flow = decoded:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
+      if dataOp == "DATA" and dataId and dataId ~= nodeId then
+        stored, capacity, count = tonumber(stored), tonumber(capacity), tonumber(count)
+        flow = flow == "NA" and nil or tonumber(flow)
+        if stored and capacity and count and stored >= 0 and capacity > 0 and stored <= capacity * 1.05 and count >= 0 and count <= 512 then
+          remotePeers[dataId] = { stored = stored, capacity = capacity, count = count, flow = flow or 0, hasFlow = flow ~= nil, seen = computer.uptime() }
+          networkStatus = "SHARING ON · " .. (function() local n = 0; for _ in pairs(remotePeers) do n = n + 1 end; return n end)() .. " REMOTE"
+          return true
+        end
+      end
+      return false
+    end
     local function draw()
       cls(); tabs = {}
       local dark, panel, cyan, soft = 0x0A1218, 0x14212B, 0x36D6D6, 0xAFC2CB
       color(dark, dark); gpu.fill(1, 1, W, 1, " "); color(dark, cyan); gpu.set(2, 1, "REACTOS  /  " .. title)
       color(0x101A22, WHITE); gpu.fill(1, 2, W, 2, " "); gpu.set(2, 2, "NTM COMPONENT MONITOR")
-      color(0x101A22, soft); gpu.set(2, 3, page == 1 and "LIVE STATUS  |  refresh every 2 seconds" or "COMPONENT TELEMETRY  |  read-only")
+      color(0x101A22, soft); gpu.set(2, 3, isBatteryApp and (page == 1 and ("LIVE STATUS  |  " .. networkStatus) or "BATTERY TELEMETRY  |  NETWORK READ-ONLY") or (page == 1 and "LIVE STATUS  |  refresh every 2 seconds" or "COMPONENT TELEMETRY  |  read-only"))
       local tx = math.max(2, W - 25)
       for _, tab in ipairs({ { "OVERVIEW", 1 }, { "DETAILS", 2 } }) do
         local label = "[ " .. tab[1] .. " ]"; local width = unicode.len(label)
@@ -7699,16 +7808,20 @@ end
         end
       end
       color(GRAY, BLACK); gpu.fill(1, H, W, 1, " ")
-      gpu.set(2, H, kind == "ntm_stardar" and "LEFT/RIGHT: PLANET   S: SEARCH   G: EXAMINE   Q: CLOSE" or "UP/DOWN: SELECT   |   R: RESCAN   |   G: PAGE   |   Q: CLOSE")
+      gpu.set(2, H, kind == "ntm_stardar" and "LEFT/RIGHT: PLANET   S: SEARCH   G: EXAMINE   Q: CLOSE" or (isBatteryApp and "N: NETWORK SHARE   |   R: REFRESH   |   G: DETAILS   |   Q: CLOSE" or "UP/DOWN: SELECT   |   R: RESCAN   |   G: PAGE   |   Q: CLOSE"))
     end
     local function update() refresh(); draw() end
-    update(); local nextRefresh = computer.uptime() + 2
+    update()
+    if isBatteryApp then setNetwork(true) end
+    draw()
+    local nextRefresh, nextNetworkRequest = computer.uptime() + 2, computer.uptime() + 5
     while true do
-      local e, _, x, y = pull(0.25)
+      local e, _, x, y, distance, protocol, encoded, checksum = pull(0.25)
       if e == "key_down" then
-        if x == 113 or x == 81 or x == 27 or y == 1 then cls(); return
+        if x == 113 or x == 81 or x == 27 or y == 1 then if isBatteryApp then setNetwork(false) end; cls(); return
         elseif x == 114 or x == 82 then update(); nextRefresh = computer.uptime() + 2
         elseif x == 103 or x == 71 then page = page == 1 and 2 or 1; draw()
+        elseif isBatteryApp and (x == 110 or x == 78) then setNetwork(not networkEnabled); update(); nextNetworkRequest = computer.uptime() + 5
         elseif kind == "ntm_stardar" and (y == 203 or y == 205) and devices[selected] then
           local d = snapshots[devices[selected]]
           local count = d and #(d.planetOptions or {}) or 0
@@ -7724,15 +7837,20 @@ end
           if planetName ~= "" then planetByDevice[devices[selected]] = planetName; read(devices[selected]); draw() end
         elseif y == 200 then selected = math.max(1, selected - 1); draw()
         elseif y == 208 then selected = math.min(#devices, selected + 1); draw() end
+      elseif e == "modem_message" then
+        local processed = receiveNetworkPacket(x, y, protocol, encoded, checksum)
+        if processed then update() end
       elseif e == "touch" then
         local changed = false
         for _, tab in ipairs(tabs) do if x >= tab[1] and x <= tab[2] and y == 3 then page = tab[3]; draw(); changed = true; break end end
         if not changed and kind == "ntm_stardar" and y == 5 and devices[selected] then
           local d = snapshots[devices[selected]]; local count = d and #(d.planetOptions or {}) or 0
           if count > 0 then d.planetIndex = d.planetIndex % count + 1; planetByDevice[devices[selected]] = d.planetOptions[d.planetIndex]; read(devices[selected]); draw() end
+        elseif not changed and isBatteryApp and y == H then setNetwork(not networkEnabled); update()
         elseif not changed and #devices > 1 and y == 5 then selected = selected % #devices + 1; draw() end
       end
       if computer.uptime() >= nextRefresh then update(); nextRefresh = computer.uptime() + 2 end
+      if isBatteryApp and networkEnabled and computer.uptime() >= nextNetworkRequest then requestRemoteReports(); nextNetworkRequest = computer.uptime() + 5 end
     end
   end
 
@@ -7956,6 +8074,8 @@ end
       { name = "RBMK Console", box = 0x802020, glyph = "RBMK", fg = 0xFFFFFF, app = "rbmk" },
       { name = "Fusion Monitor", box = 0x205868, glyph = "FUSION", fg = 0xFFFFFF, app = "fusion" },
       { name = "ICF Control", box = 0x905030, glyph = "ICF", fg = 0xFFFFFF, app = "icf" },
+      { name = "Particle Accelerator", box = 0x206080, glyph = "PARTICLE", fg = 0xFFFFFF, app = "particle" },
+      { name = "Battery Power", box = 0x206850, glyph = "BATTERY", fg = 0xFFFFFF, app = "battery" },
       { name = "Weather & Time", box = 0x207080, glyph = "WX", fg = 0xFFFFFF, app = "weather" },
       { name = "ReactX", box = 0x203878, glyph = "DX", fg = 0xFFFFFF, app = "reactx" },
       { name = "ReactSLI", box = 0x604080, glyph = "SLI", fg = 0xFFFFFF, app = "reactsli" },
@@ -7964,7 +8084,6 @@ end
     local componentsToApps = {
       { "ntm_radar", "Radar", 0x805020, "RADAR", "radar" },
       { "ntm_gas_turbine", "Gas Turbine", 0x306040, "GAS", "gasturbine" },
-      { "ntm_pa_source", "Particle Accelerator", 0x206080, "PARTICLE", "particle" },
     }
     if cfg.ntmspace == "1" then
       componentsToApps[#componentsToApps + 1] = { "ntm_atmospheric_vent", "Atmospheric Vent", 0x207080, "VENT", "vent" }
@@ -7973,9 +8092,6 @@ end
     end
     for _, app in ipairs(componentsToApps) do
       if #componentAddresses(app[1]) > 0 then icons[#icons + 1] = { name = app[2], box = app[3], glyph = app[4], fg = 0xFFFFFF, app = app[5] } end
-    end
-    if #componentAddresses("ntm_energy_storage") > 0 or #componentAddresses("ntm_energy_storage_legacy") > 0 then
-      icons[#icons + 1] = { name = "Battery Power", box = 0x206850, glyph = "BATTERY", fg = 0xFFFFFF, app = "battery" }
     end
     icons[#icons + 1] = { name = "Music Player", box = 0x803060, glyph = "MUSIC", fg = 0xFFFFFF, app = "music" }
     icons[#icons + 1] = { name = "Gallery", box = 0x703060, glyph = "PHOTO", fg = 0xFFFFFF, app = "gallery" }
@@ -7988,6 +8104,8 @@ end
       { label = "ME Storage", app = "me" }, { label = "RBMK Console", app = "rbmk" },
       { label = "Fusion Monitor", app = "fusion" },
       { label = "ICF Control", app = "icf" },
+      { label = "Particle Accelerator", app = "particle" },
+      { label = "Battery Power", app = "battery" },
       { label = "Weather & Time", app = "weather" },
       { label = "ReactX", app = "reactx" }, { label = "ReactSLI", app = "reactsli" },
       { label = "Settings", app = "settings" }, { label = "Notepad", app = "notepad" },
@@ -7996,7 +8114,6 @@ end
     }
     local componentsToApps = {
       { "ntm_radar", "Radar", "radar" }, { "ntm_gas_turbine", "Gas Turbine", "gasturbine" },
-      { "ntm_pa_source", "Particle Accelerator", "particle" },
     }
     if cfg.ntmspace == "1" then
       componentsToApps[#componentsToApps + 1] = { "ntm_atmospheric_vent", "Atmospheric Vent", "vent" }
@@ -8004,23 +8121,30 @@ end
       componentsToApps[#componentsToApps + 1] = { "ntm_rocket_pad", "Rocket Pad", "rocketpad" }
     end
     for _, entry in ipairs(componentsToApps) do if #componentAddresses(entry[1]) > 0 then items[#items + 1] = { label = entry[2], app = entry[3] } end end
-    if #componentAddresses("ntm_energy_storage") > 0 or #componentAddresses("ntm_energy_storage_legacy") > 0 then
-      items[#items + 1] = { label = "Battery Power", app = "battery" }
-    end
     if cfg.rsviewer == "1" then table.insert(items, 2, { label = "RS Storage", app = "rs" }) end
     items[#items + 1] = { label = "Reboot", app = "reboot" }
     items[#items + 1] = { label = "Shut Down", app = "shutdown" }
-    local mw, mh = 16, #items + 1
-    local mx, my = 1, H - TASKBAR_H - mh + 1
-    color(GRAY, BLACK); gpu.fill(mx, my, mw, mh, " ")
-    gpu.set(mx + 1, my, unicode.sub("ReactOS-OC", 1, mw - 2))
-    local hit = {}
-    for i, it in ipairs(items) do
-      local y = my + i
-      gpu.set(mx + 1, y, unicode.sub(it.label, 1, mw - 2))
-      hit[#hit + 1] = { mx, y, mx + mw - 1, y, it.app }
+    local mw, maxItems, selectedIndex = 16, math.max(1, H - TASKBAR_H - 3), 1
+    local mx, my, mh, firstItem, hit = 1, 1, 1, 1, {}
+    local function renderMenu()
+      local visible = math.min(#items, maxItems)
+      firstItem = math.max(1, math.min(selectedIndex - maxItems + 1, #items - visible + 1))
+      mh = visible + 1
+      my = math.max(1, H - TASKBAR_H - mh + 1)
+      hit = {}
+      cls()
+      color(GRAY, BLACK); gpu.fill(mx, my, mw, mh, " ")
+      gpu.set(mx + 1, my, unicode.sub("ReactOS " .. selectedIndex .. "/" .. #items, 1, mw - 2))
+      for row = 1, visible do
+        local i, y = firstItem + row - 1, my + row
+        local bg = i == selectedIndex and 0x30485A or GRAY
+        color(bg, BLACK); gpu.fill(mx, y, mw, 1, " ")
+        gpu.set(mx + 1, y, unicode.sub(items[i].label, 1, mw - 2))
+        hit[#hit + 1] = { mx, y, mx + mw - 1, y, items[i].app, i }
+      end
+      color(BG, FG)
     end
-    color(BG, FG)
+    renderMenu()
     while true do
       local kind, a, b = waitInput()
       if kind == "touch" then
@@ -8028,6 +8152,9 @@ end
         if not (a >= mx and a <= mx + mw - 1 and b >= my and b <= my + mh - 1) then return nil end
       elseif kind == "key" then
         if a == 27 or b == 1 then return nil end
+        if b == 200 then selectedIndex = math.max(1, selectedIndex - 1); renderMenu()
+        elseif b == 208 then selectedIndex = math.min(#items, selectedIndex + 1); renderMenu()
+        elseif a == 13 then return items[selectedIndex] and items[selectedIndex].app end
         local n = tonumber(unicode.char(a or 0))
         if n and items[n] then return items[n].app end
       end
