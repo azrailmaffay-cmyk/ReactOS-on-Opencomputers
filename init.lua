@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v5.1  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v5.2  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v5.1"
+local VERSION = "ReactOS-OC v5.2"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -8015,7 +8015,7 @@ end
   end
 
   local EMFIND_SOURCE = [====[
--- ReactOS Emission Finder v5.1
+-- ReactOS Emission Finder v5.2
 local CFG = {
   acc          = { LOW = 10000, MEDIUM = 2500, HIGH = 500 },
   wantTypes    = { MEDIUM = true, HIGH = true },
@@ -10550,7 +10550,7 @@ if sys.oc then
     until false
   end
   sys.yieldInput = function()
-    local eventName, _, p1, p2, p3 = sys.event.pull(0)
+    local eventName, _, p1, p2, p3 = sys.event.pull(0.005)
     if eventName == "key_down" then handleKey(p1, p2)
     elseif eventName == "touch" then handleTouch(p1, p2)
     elseif eventName == "scroll" then queue[#queue + 1] = { "scroll", p3, p1, p2 } end
