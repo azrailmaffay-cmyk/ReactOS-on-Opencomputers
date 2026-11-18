@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v5.0  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v5.1  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v5.0"
+local VERSION = "ReactOS-OC v5.1"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -8015,7 +8015,7 @@ end
   end
 
   local EMFIND_SOURCE = [====[
--- ReactOS Emission Finder v5.0
+-- ReactOS Emission Finder v5.1
 local CFG = {
   acc          = { LOW = 10000, MEDIUM = 2500, HIGH = 500 },
   wantTypes    = { MEDIUM = true, HIGH = true },
@@ -9883,7 +9883,14 @@ end
 
 local function bottomBar(t)
   local y = FH
-  put(1, y - 1, string.rep("▄", FW), C.red)
+  local progress, loading = 1, false
+  if diagnosticStage == "Drawing the initial screen" then progress, loading = 0.1, true
+  elseif diagnosticStage == "Checking NTM satellite links" then progress, loading = 0.25, true
+  elseif diagnosticStage == "Loading saved finder data" then progress, loading = 0.55, true
+  elseif diagnosticStage == "Saved data restored; preparing scan" or
+    diagnosticStage == "Starting demo mode — required satellite links are missing" then progress, loading = 0.9, true end
+  put(1, y - 1, string.rep("▄", FW), C.dgray)
+  if loading then put(1, y - 1, string.rep("▄", math.max(1, math.floor(FW * progress))), C.grn) end
 
   local txt, col
   local ni = narrowInfo
@@ -9892,6 +9899,7 @@ local function bottomBar(t)
     txt = string.format("▶ NB · %s · point %d/%d  %d;%d · %d s left · replies %d/%d · found %d",
       ni.kind, ni.i, ni.n, ni.x, ni.z, ni.left, ni.answered, ni.tries, ni.found)
     col = (ni.tries >= 3 and ni.answered == 0) and C.red or C.yel
+  elseif loading then txt, col = string.format("LOADING EMISSION FINDER  %d%% · %s", math.floor(progress * 100), diagnosticStage), C.yel
   else txt, col = "▶ " .. phase, ready() and C.gray or C.red end
   local clock = date("%H:%M:%S")
   local right = (not L.left and CFG.rebootAfter > 0)
