@@ -1,5 +1,5 @@
 -- =====================================================================
---  ReactOS-OC v5.6  -  single-file OS for OpenComputers (Lua 5.2/5.3)
+--  ReactOS-OC v5.7  -  single-file OS for OpenComputers (Lua 5.2/5.3)
 --
 --  Runs in TWO environments (auto-detected):
 --    BARE   : loaded as /init.lua by the EEPROM BIOS (no OpenOS)
@@ -31,7 +31,7 @@ end
 -- IMPORTANT: OpenComputers truncates read counts to 32 bits. math.maxinteger
 -- becomes -1 there (reads nothing!), math.huge is what OpenOS itself uses.
 local BIG = math.huge
-local VERSION = "ReactOS-OC v5.6"
+local VERSION = "ReactOS-OC v5.7"
 local function componentAddresses(kind)
   local result = {}
   if not component or type(component.list) ~= "function" then return result end
@@ -8051,6 +8051,106 @@ end
     end
   end
 
+  local function satelliteFinderApp()
+    local links = componentAddresses("ntm_satlink")
+    local selected, low, high, progress, found = 1, 0, 65535, 0, nil
+    local scanning, status, nextProbe, originalFreq = false, "READY — press S to scan", 0, nil
+    local function invoke(address, method, ...)
+      local ok, value = pcall(component.invoke, address, method, ...)
+      return ok, value
+    end
+    local function gcd(a, b)
+      while b ~= 0 do a, b = b, a % b end
+      return a
+    end
+    local function restoreFrequency()
+      if links[selected] and originalFreq ~= nil then invoke(links[selected], "setFreq", originalFreq) end
+      originalFreq = nil
+    end
+    local function chooseRange()
+      out("\nMinimum satellite ID (current " .. low .. "): ")
+      local lo = tonumber(trim(readline()))
+      if not lo or lo ~= math.floor(lo) or math.abs(lo) > 10000000 then status = "Invalid minimum ID"; return end
+      out("Maximum satellite ID (current " .. high .. "): ")
+      local hi = tonumber(trim(readline()))
+      if not hi or hi ~= math.floor(hi) or math.abs(hi) > 10000000 or hi < lo then status = "Invalid maximum ID"; return end
+      low, high, progress, found = lo, hi, 0, nil
+      status = "RANGE SET: " .. low .. " TO " .. high
+    end
+    local function startScan()
+      if #links == 0 then status = "NO NTM SATLINK COMPONENT"; return end
+      local span = high - low + 1
+      if span < 1 then status = "INVALID ID RANGE"; return end
+      local ok, old = invoke(links[selected], "getFreq")
+      originalFreq = ok and tonumber(old) or nil
+      progress, found = 0, nil
+      local start, step = span == 1 and 0 or math.random(0, span - 1), 1
+      if span > 1 then repeat step = math.random(1, span - 1) until gcd(step, span) == 1 end
+      scanning = { start = start, step = step, span = span }
+      status, nextProbe = "SCANNING RANDOMIZED ID SEQUENCE...", computer.uptime()
+    end
+    local function stopScan(restore)
+      scanning = false
+      if restore then restoreFrequency() end
+    end
+    local function draw()
+      cls(); bar(1, "ReactOS  /  NTM SATELLITE CODEBREAKER", 0x101A22, 0x36D6D6)
+      color(0x0A1218, 0xAFC2CB); gpu.set(2, 3, "SATLINK SCANNER  |  RANDOMIZED, NO REPEATED IDS")
+      color(0x14212B, 0x14212B); gpu.fill(2, 5, W - 3, 4, " ")
+      color(0x14212B, 0x36D6D6); gpu.set(3, 5, "LINK " .. selected .. " / " .. #links .. "   " .. tostring(links[selected] or "NO SATLINK"))
+      color(0x14212B, WHITE); gpu.set(3, 6, "ID RANGE  " .. low .. "  —  " .. high)
+      gpu.set(3, 7, found and ("FOUND SATELLITE  ID " .. found.id .. "  TYPE " .. found.kind) or ("PROBES  " .. progress .. " / " .. (scanning and scanning.span or high - low + 1)))
+      color(0x14212B, scanning and 0x36D6D6 or (found and GREEN or WHITE)); gpu.set(3, 8, status)
+      local y, bw = math.max(11, math.floor(H * 0.55)), math.max(1, W - 8)
+      local total = scanning and scanning.span or high - low + 1
+      color(0x263742, 0x263742); gpu.fill(4, y, bw, 1, " ")
+      color(0x263742, 0x36D6D6); gpu.fill(4, y, math.floor(bw * math.min(1, progress / math.max(1, total))), 1, " ")
+      color(GRAY, BLACK); gpu.fill(1, H, W, 1, " ")
+      gpu.set(2, H, "S: START/STOP   B: ID RANGE   LEFT/RIGHT: LINK   Q: CLOSE")
+    end
+    draw()
+    while true do
+      local e, _, ch, code = pull(0.05)
+      if e == "key_down" then
+        if ch == 113 or ch == 81 or ch == 27 or code == 1 then stopScan(not found); cls(); return
+        elseif ch == 115 or ch == 83 then
+          if scanning then stopScan(true); status = "STOPPED — LAST FREQUENCY RESTORED"
+          else startScan() end
+          draw()
+        elseif ch == 98 or ch == 66 then if scanning then stopScan(true) end; chooseRange(); draw()
+        elseif (code == 203 or code == 205) and #links > 0 then
+          if scanning then stopScan(true) end
+          selected = ((selected - 1 + (code == 205 and 1 or -1)) % #links) + 1
+          found, progress, originalFreq = nil, 0, nil; status = "LINK SELECTED — PRESS S TO SCAN"; draw()
+        end
+      elseif e == "touch" and code == H then
+        if scanning then stopScan(true); status = "STOPPED — LAST FREQUENCY RESTORED" else startScan() end
+        draw()
+      end
+      if scanning and computer.uptime() >= nextProbe then
+        local candidate = low + ((scanning.start + progress * scanning.step) % scanning.span)
+        local setOk = invoke(links[selected], "setFreq", candidate)
+        local typeOk, kind = false, nil
+        if setOk then typeOk, kind = invoke(links[selected], "getType") end
+        local connectionOk, connected = false, false
+        if typeOk and type(kind) == "string" and kind ~= "" and kind ~= "LEO_RADAR" and kind ~= "ORBITAL_TATOO_REMOVER" then
+          connectionOk, connected = invoke(links[selected], "isConnected")
+        end
+        progress = progress + 1
+        if typeOk and kind and kind ~= "" and kind ~= "LEO_RADAR" and kind ~= "ORBITAL_TATOO_REMOVER" then
+          found, scanning = { id = candidate, kind = kind, connected = connectionOk and connected }, false
+          status = found.connected and "DECODE COMPLETE — SIGNAL LOCKED" or "SATELLITE ID FOUND — SKY LINK BLOCKED"
+          originalFreq = nil
+        elseif progress >= scanning.span then
+          scanning, status = false, "RANGE COMPLETE — NO CONNECTED SATELLITE FOUND"
+          restoreFrequency()
+        end
+        if progress % 4 == 0 or not scanning then draw() end
+        nextProbe = computer.uptime() + 0.04
+      end
+    end
+  end
+
   local function buildIcons()
     local icons = {
       { name = "ME Storage", box = 0x2060A0, glyph = "ME", app = "me" },
@@ -8061,6 +8161,7 @@ end
       { name = "RBMK Console", box = 0x802020, glyph = "RBMK", fg = 0xFFFFFF, app = "rbmk" },
       { name = "Fusion Monitor", box = 0x205868, glyph = "FUSION", fg = 0xFFFFFF, app = "fusion" },
       { name = "ICF Control", box = 0x905030, glyph = "ICF", fg = 0xFFFFFF, app = "icf" },
+      { name = "Satellite Finder", box = 0x705030, glyph = "SATLINK", fg = 0xFFFFFF, app = "satfinder" },
       { name = "Particle Accelerator", box = 0x206080, glyph = "PARTICLE", fg = 0xFFFFFF, app = "particle" },
       { name = "Battery Power", box = 0x206850, glyph = "BATTERY", fg = 0xFFFFFF, app = "battery" },
       { name = "Weather & Time", box = 0x207080, glyph = "WX", fg = 0xFFFFFF, app = "weather" },
@@ -8091,6 +8192,7 @@ end
       { label = "ME Storage", app = "me" }, { label = "RBMK Console", app = "rbmk" },
       { label = "Fusion Monitor", app = "fusion" },
       { label = "ICF Control", app = "icf" },
+      { label = "Satellite Finder", app = "satfinder" },
       { label = "Particle Accelerator", app = "particle" },
       { label = "Battery Power", app = "battery" },
       { label = "Weather & Time", app = "weather" },
@@ -10911,6 +11013,7 @@ return { clusters = clusters, bases = bases, archive = archive, stats = stats, b
     local appNames = {
       me = "ME Storage", rs = "RS Storage", settings = "Settings", notepad = "Notepad",
       terminal = "Terminal", rbmk = "RBMK Console", fusion = "Fusion Monitor", icf = "ICF Control", weather = "Weather & Time", radar = "NTM Radar", gasturbine = "Gas Turbine", vent = "Atmospheric Vent", stardar = "Stardar", rocketpad = "Rocket Pad", particle = "Particle Accelerator", battery = "Battery Power", reactx = "ReactX", reactsli = "ReactSLI", music = "Music Player",
+      satfinder = "Satellite Finder",
       gallery = "Gallery", messages = "Messages", credits = "Credits", emfind = "Emission Finder",
     }
     local function draw()
@@ -10986,6 +11089,7 @@ return { clusters = clusters, bases = bases, archive = archive, stats = stats, b
       elseif app == "rbmk" then launchRbmk()
       elseif app == "fusion" then fusionApp()
       elseif app == "icf" then icfApp()
+      elseif app == "satfinder" then satelliteFinderApp()
       elseif app == "emfind" then local ok, err = runLua(EMFIND_SOURCE, "emfind.lua", {}); if not ok then showAppError("Emission Finder", err) end
       elseif app == "weather" then weatherTimeApp()
       elseif app == "radar" then ntmComponentApp("ntm_radar", "RADAR")
@@ -11235,9 +11339,9 @@ return { clusters = clusters, bases = bases, archive = archive, stats = stats, b
 
   local function galleryApp()
     local imageIndex, panicArmed, unlockedImage = 1, false, nil
-    -- Keep ordinary pictures first; only the two existing inflation artworks are gated.
-    local galleryOrder = { 5, 3, 6, 7, 8, 9, 1, 4 }
-    local lockedImages = { [1] = true, [4] = true }
+    -- Keep the two inflation artworks disabled and out of navigation.
+    local galleryOrder = { 5, 3, 6, 7, 8, 9 }
+    local lockedImages = {}
     local rainbow = { 0xFF4040, 0xFF9A24, 0xFFFF40, 0x40E060, 0x40BFFF, 0x9A60FF, 0xFF60C0 }
     local labels = {
       [1] = { "T H E O R G I N A L", true },
