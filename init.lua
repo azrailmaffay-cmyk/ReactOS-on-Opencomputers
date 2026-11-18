@@ -8053,7 +8053,7 @@ end
 
   local function satelliteFinderApp()
     local links = componentAddresses("ntm_satlink")
-    local selected, low, high, progress, found = 1, 0, 65535, 0, nil
+    local selected, low, high, progress, found, results, page = 1, 0, 65535, 0, nil, {}, 1
     local scanning, status, nextProbe, originalFreq = false, "READY — press S to scan", 0, nil
     local function invoke(address, method, ...)
       local ok, value = pcall(component.invoke, address, method, ...)
@@ -8095,6 +8095,13 @@ end
     end
     local function draw()
       cls(); bar(1, "ReactOS  /  NTM SATELLITE CODEBREAKER", 0x101A22, 0x36D6D6)
+      if page == 2 then
+        color(0x0A1218, 0xAFC2CB); gpu.set(2, 3, "DETECTED SATELLITES  |  ID AND TYPE")
+        for i, item in ipairs(results) do if i < H - 5 then gpu.set(3, 5 + i, string.format("%02d  ID %-10s  TYPE %s", i, tostring(item.id), tostring(item.kind))) end end
+        if #results == 0 then gpu.set(3, 6, "No satellite IDs detected yet.") end
+        color(GRAY, BLACK); gpu.fill(1, H, W, 1, " "); gpu.set(2, H, "D: OVERVIEW   Q: CLOSE")
+        return
+      end
       color(0x0A1218, 0xAFC2CB); gpu.set(2, 3, "SATLINK SCANNER  |  RANDOMIZED, NO REPEATED IDS")
       color(0x14212B, 0x14212B); gpu.fill(2, 5, W - 3, 4, " ")
       color(0x14212B, 0x36D6D6); gpu.set(3, 5, "LINK " .. selected .. " / " .. #links .. "   " .. tostring(links[selected] or "NO SATLINK"))
@@ -8106,7 +8113,7 @@ end
       color(0x263742, 0x263742); gpu.fill(4, y, bw, 1, " ")
       color(0x263742, 0x36D6D6); gpu.fill(4, y, math.floor(bw * math.min(1, progress / math.max(1, total))), 1, " ")
       color(GRAY, BLACK); gpu.fill(1, H, W, 1, " ")
-      gpu.set(2, H, "S: START/STOP   B: ID RANGE   LEFT/RIGHT: LINK   Q: CLOSE")
+      gpu.set(2, H, "S: SCAN   D: DETECTED IDS   B: ID RANGE   LEFT/RIGHT: LINK   Q: CLOSE")
     end
     draw()
     while true do
@@ -8118,6 +8125,7 @@ end
           else startScan() end
           draw()
         elseif ch == 98 or ch == 66 then if scanning then stopScan(true) end; chooseRange(); draw()
+        elseif ch == 100 or ch == 68 then page = page == 1 and 2 or 1; draw()
         elseif (code == 203 or code == 205) and #links > 0 then
           if scanning then stopScan(true) end
           selected = ((selected - 1 + (code == 205 and 1 or -1)) % #links) + 1
@@ -8139,6 +8147,7 @@ end
         progress = progress + 1
         if typeOk and kind and kind ~= "" and kind ~= "LEO_RADAR" and kind ~= "ORBITAL_TATOO_REMOVER" then
           found, scanning = { id = candidate, kind = kind, connected = connectionOk and connected }, false
+          results[#results + 1] = { id = candidate, kind = kind }
           status = found.connected and "DECODE COMPLETE — SIGNAL LOCKED" or "SATELLITE ID FOUND — SKY LINK BLOCKED"
           originalFreq = nil
         elseif progress >= scanning.span then
